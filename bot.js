@@ -1,333 +1,147 @@
-// bot.js
-
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const express = require('express');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
 
-const app = express();
-const port = process.env.PORT || 3000;
+// Admin Number (CHANGE THIS TO YOUR NUMBER)
+const ADMIN_NUMBER = "+254701339573";
 
-let qrImageUrl = null;  // This will store the QR code image (as a data URL)
-
-// In-memory order storage (for demo purposes)
-const orders = {};
-
-// Helper: Generate order number in the format FY'S-XXXXXX (6-digit number)
-function generateOrderNumber() {
-    const randomSixDigits = Math.floor(100000 + Math.random() * 900000);
-    return `FY'S-${randomSixDigits}`;
-}
-
-// Define available packages and categories
-const packages = {
-    airtime: {
-        name: 'Airtime',
-        description: 'Recharge your airtime instantly in KES.'
-    },
-    data: {
-        name: 'Data Bundles',
-        categories: ['daily', 'hourly', 'weekly', 'monthly'],
-        description: 'Purchase data bundles in various categories.'
-    },
-    sms: {
-        name: 'SMS Bundles',
-        categories: ['daily', 'weekly', 'monthly'],
-        description: 'Purchase SMS bundles for different periods.'
-    }
-};
-
-// Define your admin WhatsApp number (in WhatsApp format, without the plus sign)
-// For example, +254701339573 becomes: 254701339573@c.us
-const adminNumber = "254701339573@c.us";
-
-// Initialize the WhatsApp client with LocalAuth for session persistence
+// Create a new WhatsApp client
 const client = new Client({
-    authStrategy: new LocalAuth()
+    authStrategy: new LocalAuth(),
+    puppeteer: { headless: true }
 });
 
-// When a QR code is generated, convert it to a data URL so we can serve it in a webpage.
-client.on('qr', (qr) => {
-    console.log('QR RECEIVED, generating image...');
-    QRCode.toDataURL(qr, (err, url) => {
-        if (err) {
-            console.error('Error generating QR code', err);
-        } else {
-            qrImageUrl = url;
-            console.log('QR code updated. Visit http://localhost:' + port + '/qr to view it.');
-        }
-    });
+// Generate QR Code
+client.on('qr', qr => {
+    console.log("Scan this QR code to connect:");
+    qrcode.generate(qr, { small: true });
 });
 
-// Log when the client is ready.
+// Bot Ready
 client.on('ready', () => {
-    console.log('WhatsApp Client is ready!');
+    console.log("✅ Bot is Online & Ready!");
 });
 
-// Listen for incoming WhatsApp messages
-client.on('message', async (message) => {
-    const msg = message.body.trim();
+// Store orders in a JSON file
+const ordersFile = 'orders.json';
+let orders = fs.existsSync(ordersFile) ? JSON.parse(fs.readFileSync(ordersFile)) : {};
+
+// Save orders to file
+const saveOrders = () => fs.writeFileSync(ordersFile, JSON.stringify(orders, null, 2));
+
+// Generate Unique Order ID
+const generateOrderID = () => "FY'S-" + Math.floor(100000 + Math.random() * 900000);
+
+// Handle Incoming Messages
+client.on('message', async message => {
     const sender = message.from;
-    
-    // -------------------------
-    // ADMIN COMMANDS (only from adminNumber)
-    // -------------------------
-    if (sender === adminNumber && msg.toLowerCase().startsWith('update')) {
-        // Expected format: update <orderNumber> <newStatus>
-        const parts = msg.split(' ');
-        if (parts.length >= 3) {
-            const orderNumber = parts[1].trim();
-            const newStatus = parts.slice(2).join(' ').trim();
-            if (orders[orderNumber]) {
-                orders[orderNumber].status = newStatus;
-                // Notify the user who placed the order
-                const userNumber = orders[orderNumber].user;
-                await client.sendMessage(userNumber, `Your order ${orderNumber} status has been updated to: ${newStatus}`);
-                await client.sendMessage(adminNumber, `Order ${orderNumber} updated to: ${newStatus}`);
-            } else {
-                await client.sendMessage(adminNumber, `Order ${orderNumber} not found.`);
-            }
+    const text = message.body.trim();
+
+    // Admin Order Status Update
+    if (sender === ADMIN_NUMBER && text.startsWith("update ")) {
+        const [_, orderId, status] = text.split(" ");
+        if (orders[orderId]) {
+            orders[orderId].status = status;
+            saveOrders();
+            client.sendMessage(orders[orderId].customer, `📢 *Order Update* 📢\nYour order *${orderId}* is now *${status.toUpperCase()}*.`);
+            client.sendMessage(ADMIN_NUMBER, `✅ Order *${orderId}* marked as *${status.toUpperCase()}*`);
         } else {
-            await client.sendMessage(adminNumber, `Invalid update command format. Use: update <orderNumber> <newStatus>`);
+            client.sendMessage(ADMIN_NUMBER, `❌ Order ID *${orderId}* not found.`);
         }
         return;
     }
-    
-    // -------------------------
-    // USER COMMANDS
-    // -------------------------
-    
-    // !start command: send welcome message with instructions
-    if (msg.toLowerCase() === '!start') {
-        const welcomeMsg = `Welcome to the Buying Bot!
 
-We offer the following packages in Kenyan Shillings (KES):
-
-1. Airtime - Recharge your mobile airtime.
-2. Data Bundles - Categories: ${packages.data.categories.join(', ')}.
-3. SMS Bundles - Categories: ${packages.sms.categories.join(', ')}.
-
-To purchase, use the following command formats:
-• Airtime: !buy airtime <amount> <target_number>
-• Data: !buy data <category> <amount> <target_number>
-• SMS: !buy sms <category> <quantity> <target_number>
-
-To check your order status, type: !order <order_number>
-
-Example:
-!buy airtime 100 254712345678`;
-        await client.sendMessage(sender, welcomeMsg);
-        return;
-    }
-    
-    // Check order status: !order <orderNumber>
-    if (msg.toLowerCase().startsWith('!order')) {
-        const parts = msg.split(' ');
-        if (parts.length === 2) {
-            const orderNumber = parts[1].trim();
-            if (orders[orderNumber]) {
-                const order = orders[orderNumber];
-                await client.sendMessage(sender, `Order Details:
-Order Number: ${orderNumber}
-Package: ${order.packageType}
-Category: ${order.category || 'N/A'}
-Amount/Quantity: ${order.amount}
-Target Number: ${order.target}
-Status: ${order.status}`);
-            } else {
-                await client.sendMessage(sender, `Order ${orderNumber} not found.`);
-            }
+    // View Order Status
+    if (text.startsWith("status ")) {
+        const orderId = text.split(" ")[1];
+        if (orders[orderId]) {
+            const order = orders[orderId];
+            client.sendMessage(sender, `📦 *Order Status* 📦\n*Order:* ${orderId}\n*Status:* ${order.status}\n*Package:* ${order.package}\n*Amount:* KSH ${order.amount}\n*Recipient:* ${order.recipient}`);
         } else {
-            await client.sendMessage(sender, `Invalid command. Use: !order <order_number>`);
+            client.sendMessage(sender, "❌ Order not found. Check your order number.");
         }
         return;
     }
-    
-    // Process purchase commands: !buy <type> <...args>
-    if (msg.toLowerCase().startsWith('!buy')) {
-        const parts = msg.split(' ');
-        if (parts.length < 4) {
-            await client.sendMessage(sender, 'Invalid command format. Please check the instructions using !start');
-            return;
-        }
-        const packageType = parts[1].toLowerCase();
-        
-        // Airtime Purchase: !buy airtime <amount> <target_number>
-        if (packageType === 'airtime') {
-            if (parts.length !== 4) {
-                await client.sendMessage(sender, 'Invalid format for airtime purchase. Use: !buy airtime <amount> <target_number>');
-                return;
-            }
-            const amount = parts[2];
-            const target = parts[3];
-            const orderNumber = generateOrderNumber();
-            orders[orderNumber] = {
-                user: sender,
-                packageType: 'Airtime',
-                category: null,
-                amount: amount,
-                target: target,
-                status: 'Pending'
-            };
-            const responseMsg = `Thank you for your purchase!
-Order Number: ${orderNumber}
-Package: Airtime
-Amount: KES ${amount}
-Target Number: ${target}
-Status: Pending`;
-            await client.sendMessage(sender, responseMsg);
-            // Notify admin with order details
-            const adminMsg = `New Order Received:
-Order Number: ${orderNumber}
-Package: Airtime
-Amount: KES ${amount}
-User: ${sender}
-Target Number: ${target}`;
-            await client.sendMessage(adminNumber, adminMsg);
-            return;
-        }
-        
-        // Data Bundle Purchase: !buy data <category> <amount> <target_number>
-        else if (packageType === 'data') {
-            if (parts.length !== 5) {
-                await client.sendMessage(sender, 'Invalid format for data purchase. Use: !buy data <category> <amount> <target_number>');
-                return;
-            }
-            const category = parts[2].toLowerCase();
-            if (!packages.data.categories.includes(category)) {
-                await client.sendMessage(sender, `Invalid data category. Available categories: ${packages.data.categories.join(', ')}`);
-                return;
-            }
-            const amount = parts[3];
-            const target = parts[4];
-            const orderNumber = generateOrderNumber();
-            orders[orderNumber] = {
-                user: sender,
-                packageType: 'Data Bundles',
-                category: category,
-                amount: amount,
-                target: target,
-                status: 'Pending'
-            };
-            const responseMsg = `Thank you for your purchase!
-Order Number: ${orderNumber}
-Package: Data Bundles (${category})
-Amount: KES ${amount}
-Target Number: ${target}
-Status: Pending`;
-            await client.sendMessage(sender, responseMsg);
-            // Notify admin
-            const adminMsg = `New Order Received:
-Order Number: ${orderNumber}
-Package: Data Bundles (${category})
-Amount: KES ${amount}
-User: ${sender}
-Target Number: ${target}`;
-            await client.sendMessage(adminNumber, adminMsg);
-            return;
-        }
-        
-        // SMS Bundle Purchase: !buy sms <category> <quantity> <target_number>
-        else if (packageType === 'sms') {
-            if (parts.length !== 5) {
-                await client.sendMessage(sender, 'Invalid format for SMS purchase. Use: !buy sms <category> <quantity> <target_number>');
-                return;
-            }
-            const category = parts[2].toLowerCase();
-            if (!packages.sms.categories.includes(category)) {
-                await client.sendMessage(sender, `Invalid SMS category. Available categories: ${packages.sms.categories.join(', ')}`);
-                return;
-            }
-            const quantity = parts[3];
-            const target = parts[4];
-            const orderNumber = generateOrderNumber();
-            orders[orderNumber] = {
-                user: sender,
-                packageType: 'SMS Bundles',
-                category: category,
-                amount: quantity,
-                target: target,
-                status: 'Pending'
-            };
-            const responseMsg = `Thank you for your purchase!
-Order Number: ${orderNumber}
-Package: SMS Bundles (${category})
-Quantity: ${quantity}
-Target Number: ${target}
-Status: Pending`;
-            await client.sendMessage(sender, responseMsg);
-            // Notify admin
-            const adminMsg = `New Order Received:
-Order Number: ${orderNumber}
-Package: SMS Bundles (${category})
-Quantity: ${quantity}
-User: ${sender}
-Target Number: ${target}`;
-            await client.sendMessage(adminNumber, adminMsg);
-            return;
-        }
-        else {
-            await client.sendMessage(sender, 'Invalid package type. Please use airtime, data, or sms.');
-            return;
-        }
+
+    // Buying Menu
+    if (text === "1") {
+        client.sendMessage(sender, "📦 *Choose a Category:* 📦\n1️⃣ Data Bundles\n2️⃣ Airtime\n3️⃣ SMS\n(Reply with a number)");
+        return;
     }
-    
-    // If command not recognized, provide a help message.
-    await client.sendMessage(sender, 'Unknown command. Please type !start to see available commands.');
+
+    // Data Bundles
+    if (text === "1.1") {
+        client.sendMessage(sender, "📊 *Choose a Data Bundle:* 📊\n✅ 1. *1.25GB* @ *KSH 55* (Till Midnight)\n✅ 2. *1.5GB* @ *KSH 49* (3 Hours)\n✅ 3. *1GB* @ *KSH 99* (24 Hours)\n(Reply with a number)");
+        return;
+    }
+
+    // Capture Order
+    if (["1.1.1", "1.1.2", "1.1.3"].includes(text)) {
+        const packages = {
+            "1.1.1": { name: "1.25GB (Till Midnight)", price: 55 },
+            "1.1.2": { name: "1.5GB (3 Hours)", price: 49 },
+            "1.1.3": { name: "1GB (24 Hours)", price: 99 }
+        };
+        const chosen = packages[text];
+        const orderId = generateOrderID();
+
+        orders[orderId] = {
+            customer: sender,
+            package: chosen.name,
+            amount: chosen.price,
+            recipient: null,
+            payment: null,
+            status: "Pending"
+        };
+        saveOrders();
+
+        client.sendMessage(sender, `📌 *Order Created:* ${orderId}\n📞 Please enter the recipient number (07XXXXXXXX)`);
+        return;
+    }
+
+    // Capture Recipient Number
+    if (/^07\d{8}$/.test(text) || /^01\d{8}$/.test(text)) {
+        const orderId = Object.keys(orders).find(id => orders[id].customer === sender && !orders[id].recipient);
+        if (orderId) {
+            orders[orderId].recipient = text;
+            saveOrders();
+            client.sendMessage(sender, `✅ Recipient set: ${text}\n📞 Now enter the payment number (07XXXXXXXX)`);
+        }
+        return;
+    }
+
+    // Capture Payment Number
+    if (/^07\d{8}$/.test(text) || /^01\d{8}$/.test(text)) {
+        const orderId = Object.keys(orders).find(id => orders[id].customer === sender && orders[id].recipient && !orders[id].payment);
+        if (orderId) {
+            orders[orderId].payment = text;
+            saveOrders();
+            const order = orders[orderId];
+
+            // Send Payment Instructions
+            client.sendMessage(sender, `💰 *Payment Instructions* 💰\n1️⃣ Send *KSH ${order.amount}* to *0701339573 (Camlus)* via M-Pesa\n2️⃣ Reply *PAID ${orderId}* after payment`);
+            client.sendMessage(ADMIN_NUMBER, `📢 *New Order* 📢\n🆔 Order: ${orderId}\n📦 Package: ${order.package}\n💰 Amount: KSH ${order.amount}\n📞 Recipient: ${order.recipient}\n📞 Payment From: ${order.payment}\n👤 User: ${sender}`);
+        }
+        return;
+    }
+
+    // Confirm Payment
+    if (text.startsWith("PAID ")) {
+        const orderId = text.split(" ")[1];
+        if (orders[orderId]) {
+            orders[orderId].status = "Confirmed";
+            saveOrders();
+            client.sendMessage(sender, `✅ Payment confirmed! Your order *${orderId}* is now processing.`);
+            client.sendMessage(ADMIN_NUMBER, `🔔 Order *${orderId}* has been marked as *CONFIRMED*`);
+        } else {
+            client.sendMessage(sender, "❌ Order ID not found.");
+        }
+        return;
+    }
+
+    // Default Response
+    client.sendMessage(sender, "🤖 Welcome to *FY'S PROPERTY BOT* 🎉\n1️⃣ Buy Bundles, Airtime & SMS\n2️⃣ Check Order Status (status ORDER_ID)\n3️⃣ Contact Support");
 });
 
-// Initialize the WhatsApp client (this will prompt you to scan the QR code if no session is saved)
+// Start the bot
 client.initialize();
-
-// -------------------------
-// Express Server Routes
-// -------------------------
-
-// Route to show the QR code so you can scan and link the bot
-app.get('/qr', (req, res) => {
-    if (qrImageUrl) {
-        res.send(`
-            <html>
-                <head>
-                    <title>WhatsApp Bot QR Code</title>
-                </head>
-                <body style="font-family: Arial, sans-serif; text-align: center;">
-                    <h1>Scan this QR Code with WhatsApp</h1>
-                    <img src="${qrImageUrl}" alt="QR Code" style="width:300px;height:300px;" />
-                    <p>If you have already scanned the code, the bot should be connected.</p>
-                </body>
-            </html>
-        `);
-    } else {
-        res.send(`
-            <html>
-                <head>
-                    <title>WhatsApp Bot QR Code</title>
-                </head>
-                <body style="font-family: Arial, sans-serif; text-align: center;">
-                    <h1>QR Code not available yet.</h1>
-                    <p>Please check the server console for updates.</p>
-                </body>
-            </html>
-        `);
-    }
-});
-
-// Root route with a simple welcome message and link to the QR code page
-app.get('/', (req, res) => {
-    res.send(`
-        <html>
-            <head>
-                <title>WhatsApp Buying Bot</title>
-            </head>
-            <body style="font-family: Arial, sans-serif; text-align: center;">
-                <h1>Welcome to the WhatsApp Buying Bot</h1>
-                <p>To connect the bot, please scan the QR code at <a href="/qr">/qr</a>.</p>
-            </body>
-        </html>
-    `);
-});
-
-// Start the Express server
-app.listen(port, () => {
-    console.log(`Express server is running on http://localhost:${port}`);
-});
