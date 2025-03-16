@@ -10,24 +10,24 @@ const express = require('express');
  * =============================
  */
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254701339573'; // Your admin number (without +)
-let PAYMENT_INFO = '0701339573 (Camlus)'; // Default payment info (M-Pesa details)
+let PAYMENT_INFO = '0701339573 (Camlus)'; // Default M-Pesa details; admin can change it
 const PORT = 3000; // Express server port
 
 // In-memory orders store (keys = orderID)
 const orders = {};
 
-// Minimal session object to handle user flow (key = sender)
-const session = {}; // e.g. { "2547xxxx@c.us": { step: 'main', prevStep: null, ... } }
+// Minimal session store to manage user flow (key = sender)
+const session = {};
 
 /**
- * Helper: Generate a unique order ID in format FY'S-XXXXXX
+ * Helper: Generate a unique order ID (e.g., FY'S-123456)
  */
 function generateOrderID() {
   return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 /**
- * Helper: Validate if a number is a valid Safaricom number (07xxxxxxx or 01xxxxxxx)
+ * Helper: Validate Safaricom phone numbers (07XXXXXXXX or 01XXXXXXXX)
  */
 function isSafaricomNumber(num) {
   return /^0[71]\d{8}$/.test(num) || /^01\d{8}$/.test(num);
@@ -35,44 +35,44 @@ function isSafaricomNumber(num) {
 
 /**
  * =============================
- * PACKAGES (Airtime, Data, SMS)
+ * PACKAGES: Airtime, Data, and SMS
  * =============================
  */
-// Airtime: Let user type the amount they wish to purchase.
+// Airtime: Users type the amount they want.
 
-// Data Packages organized by subcategory
+// Data packages grouped by subcategory
 const dataPackages = {
   hourly: [
     { id: 1, name: '1GB', price: 19, validity: '1 hour' },
-    { id: 2, name: '1.5GB', price: 49, validity: '3 hours' },
+    { id: 2, name: '1.5GB', price: 49, validity: '3 hours' }
   ],
   daily: [
     { id: 1, name: '1.25GB', price: 55, validity: 'Till midnight' },
     { id: 2, name: '1GB', price: 99, validity: '24 hours' },
-    { id: 3, name: '250MB', price: 20, validity: '24 hours' },
+    { id: 3, name: '250MB', price: 20, validity: '24 hours' }
   ],
   weekly: [
     { id: 1, name: '6GB', price: 700, validity: '7 days' },
     { id: 2, name: '2.5GB', price: 300, validity: '7 days' },
-    { id: 3, name: '350MB', price: 50, validity: '7 days' },
+    { id: 3, name: '350MB', price: 50, validity: '7 days' }
   ],
   monthly: [
     { id: 1, name: '1.2GB', price: 250, validity: '30 days' },
-    { id: 2, name: '500MB', price: 100, validity: '30 days' },
-  ],
+    { id: 2, name: '500MB', price: 100, validity: '30 days' }
+  ]
 };
 
-// SMS Packages organized by subcategory
+// SMS packages grouped by subcategory
 const smsPackages = {
   daily: [
-    { id: 1, name: '200 SMS', price: 10, validity: 'Daily' },
+    { id: 1, name: '200 SMS', price: 10, validity: 'Daily' }
   ],
   weekly: [
-    { id: 1, name: '1000 SMS', price: 29, validity: 'Weekly' },
+    { id: 1, name: '1000 SMS', price: 29, validity: 'Weekly' }
   ],
   monthly: [
-    { id: 1, name: '2000 SMS', price: 99, validity: 'Monthly' },
-  ],
+    { id: 1, name: '2000 SMS', price: 99, validity: 'Monthly' }
+  ]
 };
 
 /**
@@ -82,7 +82,7 @@ const smsPackages = {
  */
 const client = new Client({
   authStrategy: new LocalAuth(),
-  puppeteer: { headless: true },
+  puppeteer: { headless: true }
 });
 
 let qrImageUrl = null; // Will hold QR code as a data URL
@@ -90,7 +90,6 @@ let qrImageUrl = null; // Will hold QR code as a data URL
 client.on('qr', (qr) => {
   console.log('🔐 Scan the QR code below with WhatsApp:');
   qrcodeTerminal.generate(qr, { small: true });
-  // Also store as a data URL for the Express web page:
   QRCode.toDataURL(qr, (err, url) => {
     if (!err) qrImageUrl = url;
   });
@@ -98,27 +97,44 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
   console.log('✅ Bot is online and ready!');
-  // Optionally, notify admin that the bot is live.
-  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live. Type "menu" for user flow or use admin commands.`);
+  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live.\nType "menu" for the user flow or use admin commands to manage orders.`);
 });
 
 /**
  * =============================
  * ADMIN COMMANDS
  * =============================
- * Only the admin (your number) can execute the following:
- * 1) update <ORDER_ID> <STATUS>
- * 2) set payment <mpesa_number> "<Name>"
- * 3) add data <subcat> "<name>" <price> "<validity>"
- * 4) remove data <subcat> <id>
- * 5) edit data <subcat> <id> <newprice>
- * 6) add sms <subcat> "<name>" <price> "<validity>"
- * 7) remove sms <subcat> <id>
- * 8) edit sms <subcat> <id> <newprice>
- * 9) search <ORDER_ID>
+ * Only messages from ${ADMIN_NUMBER}@c.us are considered admin commands.
+ *
+ * Commands:
+ *   update <ORDER_ID> <STATUS>
+ *     - Updates an order's status. Sends a beautiful update message to the customer.
+ *
+ *   set payment <mpesa_number> "<Name>"
+ *     - Updates PAYMENT_INFO (e.g., set payment 0712345678 "Camlus 2.0")
+ *
+ *   add data <subcat> "<name>" <price> "<validity>"
+ *     - Adds a new data package to the specified subcategory (hourly, daily, weekly, monthly)
+ *
+ *   remove data <subcat> <id>
+ *     - Removes a data package from the specified subcategory
+ *
+ *   edit data <subcat> <id> <newprice>
+ *     - Updates the price of a data package in the specified subcategory
+ *
+ *   add sms <subcat> "<name>" <price> "<validity>"
+ *     - Adds a new SMS package to the specified subcategory (daily, weekly, monthly)
+ *
+ *   remove sms <subcat> <id>
+ *     - Removes an SMS package from the specified subcategory
+ *
+ *   edit sms <subcat> <id> <newprice>
+ *     - Updates the price of an SMS package
+ *
+ *   search <ORDER_ID>
+ *     - Searches and displays all details of an order, including the time placed.
  */
 function parseQuotedParts(parts, fromIndex) {
-  // Simple parser to join quoted strings
   let result = [];
   let current = '';
   let inQuote = false;
@@ -144,13 +160,11 @@ function parseQuotedParts(parts, fromIndex) {
 }
 
 client.on('message', async (msg) => {
-  const sender = msg.from; // WhatsApp ID e.g. "2547xxxx@c.us"
+  const sender = msg.from; // e.g., "2547XXXXXXXX@c.us"
   const body = msg.body.trim();
   const lower = body.toLowerCase();
 
-  // -----------------------------
-  // ADMIN COMMANDS - Only from admin
-  // -----------------------------
+  // ---------- ADMIN COMMANDS ----------
   if (sender === `${ADMIN_NUMBER}@c.us`) {
     // Command: update <ORDER_ID> <STATUS>
     if (lower.startsWith('update ')) {
@@ -164,20 +178,21 @@ client.on('message', async (msg) => {
         return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
       }
       orders[orderID].status = newStatus;
-      // Send a beautiful update message to the user
-      let extra = '';
+      const user = orders[orderID].customer;
+      let extraMsg = '';
       if (newStatus === 'CONFIRMED') {
-        extra = '✅ Your payment is confirmed! We are processing your order. Thank you for choosing FYS PROPERTY. For help, call 0701339573.';
+        extraMsg = '✅ Your payment has been confirmed! We are processing your order.';
       } else if (newStatus === 'COMPLETED') {
-        extra = '🎉 Your order has been completed. We sincerely thank you for choosing FYS PROPERTY! Enjoy your purchase!';
+        extraMsg = '🎉 Your order has been completed! Thank you for choosing FYS PROPERTY. We hope you enjoy your purchase!';
       } else if (newStatus === 'CANCELLED') {
-        extra = '🚫 Your order has been cancelled. Please contact support if you need further assistance.';
+        extraMsg = '🚫 Your order has been cancelled. Please contact support if needed.';
       } else if (newStatus === 'REFUNDED') {
-        extra = '💰 Your order has been refunded. Please check your M-Pesa balance.';
+        extraMsg = '💰 Your order has been refunded. Please check your M-Pesa balance.';
       } else {
-        extra = 'Your order status has been updated.';
+        extraMsg = 'Your order status has been updated.';
       }
-      client.sendMessage(orders[orderID].customer, `🔔 *Order Update*\nOrder *${orderID}* is now *${newStatus}*.\n${extra}\n\nReply with "0" to go back or "00" for main menu.`);
+      // Send a beautiful, sensitive update message to the customer.
+      client.sendMessage(user, `🔔 *Order Update*\nYour order *${orderID}* is now *${newStatus}*.\n\n✨ Thank you for choosing FYS PROPERTY! We truly appreciate your trust. For any help, please call 0701339573.\n\nReply with "0" to go back to the previous menu or "00" for the main menu.`);
       return client.sendMessage(sender, `✅ Order *${orderID}* updated to *${newStatus}* successfully.`);
     }
 
@@ -196,7 +211,6 @@ client.on('message', async (msg) => {
     // Command: add data <subcat> "<name>" <price> "<validity>"
     if (lower.startsWith('add data ')) {
       const parts = parseQuotedParts(body.split(' '), 2);
-      // parts[0]: subcat, parts[1]: name, parts[2]: price, parts[3]: validity
       if (parts.length < 4) {
         return client.sendMessage(sender, '❌ Usage: add data <subcat> "<name>" <price> "<validity>"');
       }
@@ -233,7 +247,7 @@ client.on('message', async (msg) => {
       const arr = dataPackages[subcat];
       const idx = arr.findIndex(p => p.id === idToRemove);
       if (idx === -1) {
-        return client.sendMessage(sender, `❌ No package with ID ${idToRemove} in ${subcat}.`);
+        return client.sendMessage(sender, `❌ No data package with ID ${idToRemove} in ${subcat}.`);
       }
       arr.splice(idx, 1);
       return client.sendMessage(sender, `✅ Removed data package ID ${idToRemove} from ${subcat}.`);
@@ -256,13 +270,13 @@ client.on('message', async (msg) => {
       }
       const pack = dataPackages[subcat].find(p => p.id === idToEdit);
       if (!pack) {
-        return client.sendMessage(sender, `❌ No package with ID ${idToEdit} in ${subcat}.`);
+        return client.sendMessage(sender, `❌ No data package with ID ${idToEdit} in ${subcat}.`);
       }
       pack.price = newPrice;
       return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
     }
 
-    // Similar commands for SMS:
+    // Command: add sms <subcat> "<name>" <price> "<validity>"
     if (lower.startsWith('add sms ')) {
       const parts = parseQuotedParts(body.split(' '), 2);
       if (parts.length < 4) {
@@ -283,6 +297,8 @@ client.on('message', async (msg) => {
       arr.push({ id: newId, name, price, validity });
       return client.sendMessage(sender, `✅ Added new SMS package: [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
     }
+
+    // Command: remove sms <subcat> <id>
     if (lower.startsWith('remove sms ')) {
       const parts = body.split(' ');
       if (parts.length < 4) {
@@ -304,6 +320,8 @@ client.on('message', async (msg) => {
       arr.splice(idx, 1);
       return client.sendMessage(sender, `✅ Removed SMS package ID ${idToRemove} from ${subcat}.`);
     }
+
+    // Command: edit sms <subcat> <id> <newprice>
     if (lower.startsWith('edit sms ')) {
       const parts = body.split(' ');
       if (parts.length < 5) {
@@ -326,7 +344,7 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
     }
 
-    // 9) Search order: "search <ORDER_ID>"
+    // Command: search <ORDER_ID>
     if (lower.startsWith('search ')) {
       const parts = body.split(' ');
       if (parts.length !== 2) {
@@ -350,15 +368,12 @@ client.on('message', async (msg) => {
     }
   } // END ADMIN COMMANDS
 
-  // -----------------------------
-  // USER FLOW
-  // -----------------------------
-  // Allow users to type "0" to go back to the previous menu, "00" for main menu.
+  // ---------- USER FLOW ----------
+  // Allow "0" to go back to previous menu and "00" for main menu.
   if (body === '0') {
-    // Go back: if session has a previous step stored, revert; otherwise, go to main.
     if (session[sender] && session[sender].prevStep) {
       session[sender].step = session[sender].prevStep;
-      return client.sendMessage(sender, '🔙 Going back to previous menu...');
+      return client.sendMessage(sender, '🔙 Returning to previous menu...');
     } else {
       session[sender] = { step: 'main' };
       return client.sendMessage(sender, '🏠 Returning to main menu...');
@@ -373,23 +388,22 @@ client.on('message', async (msg) => {
   if (lower === 'menu' || lower === 'start') {
     session[sender] = { step: 'main' };
     const welcomeMsg = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟\n\n` +
-      `Thank you for choosing FYS PROPERTY! We are here to serve you with the best offers.\n\n` +
+      `Thank you for choosing FYS PROPERTY! We are dedicated to providing you with the best offers.\n\n` +
       `Please choose an option by typing a number:\n` +
       `1️⃣ Airtime\n` +
       `2️⃣ Data Bundles\n` +
       `3️⃣ SMS Bundles\n\n` +
       `For order status, type: status <ORDER_ID>\n` +
-      `Or if you've paid, type: PAID <ORDER_ID>\n`;
+      `Or if you've paid, type: PAID <ORDER_ID>\n` +
+      `Type "00" at any time to return to the main menu.`;
     return client.sendMessage(sender, welcomeMsg);
   }
 
-  // ---------------------------
-  // AIRTIME FLOW
-  // ---------------------------
+  // --------- Airtime Flow ---------
   if (session[sender]?.step === 'main' && lower === '1') {
     session[sender].prevStep = 'main';
     session[sender].step = 'airtime';
-    return client.sendMessage(sender, '💳 *Airtime Purchase*\n\nPlease enter the amount (e.g., "50" for KES 50):');
+    return client.sendMessage(sender, '💳 *Airtime Purchase*\n\nPlease enter the amount in KES (e.g., "50").\nType "0" to go back.');
   }
   if (session[sender]?.step === 'airtime') {
     const amt = Number(body);
@@ -405,7 +419,7 @@ client.on('message', async (msg) => {
       recipient: null,
       payment: null,
       status: 'PENDING',
-      timestamp: new Date().toISOString(),
+      timestamp: new Date().toISOString()
     };
     delete session[sender];
     return client.sendMessage(sender,
@@ -413,25 +427,23 @@ client.on('message', async (msg) => {
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: Airtime (KES ${amt})\n` +
       `💰 Price: KES ${amt}\n\n` +
-      `👉 Please enter the *recipient phone number* (Safaricom, e.g., 07XXXXXXXX):`
+      `👉 Please enter the *recipient phone number* (Safaricom, e.g., 07XXXXXXXX).\nType "0" to go back.`
     );
   }
 
-  // ---------------------------
-  // DATA FLOW
-  // ---------------------------
+  // --------- Data Flow ---------
   if (session[sender]?.step === 'main' && lower === '2') {
     session[sender].prevStep = 'main';
     session[sender].step = 'data-category';
     return client.sendMessage(sender,
       `📶 *Data Bundles*\nChoose a subcategory by typing the number:\n` +
       `1) Hourly\n2) Daily\n3) Weekly\n4) Monthly\n\n` +
-      `Type "0" to go back, or "00" for main menu.`
+      `Type "0" to go back, "00" for main menu.`
     );
   }
   if (session[sender]?.step === 'data-category') {
     if (!['1','2','3','4'].includes(lower)) {
-      return client.sendMessage(sender, '❌ Invalid choice. Please type 1,2,3, or 4.');
+      return client.sendMessage(sender, '❌ Invalid choice. Please type 1, 2, 3, or 4.');
     }
     let cat = '';
     if (lower === '1') cat = 'hourly';
@@ -443,7 +455,7 @@ client.on('message', async (msg) => {
     session[sender].dataCat = cat;
     let listMsg = `✅ *${cat.toUpperCase()} Data Bundles:*\n`;
     dataPackages[cat].forEach((p) => {
-      listMsg += `[${p.id}] ${p.name} @ KES ${p.price} (${p.validity})\n`;
+      listMsg += `[${p.id}] ${p.name} @ KSH ${p.price} (${p.validity})\n`;
     });
     listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
     return client.sendMessage(sender, listMsg);
@@ -467,26 +479,24 @@ client.on('message', async (msg) => {
       recipient: null,
       payment: null,
       status: 'PENDING',
-      timestamp: new Date().toISOString(),
+      timestamp: new Date().toISOString()
     };
     delete session[sender];
     return client.sendMessage(sender,
       `🛒 *Order Created!*\n\n` +
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: ${selected.name} (${cat})\n` +
-      `💰 Price: KES ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).`
+      `💰 Price: KSH ${selected.price}\n\n` +
+      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).\nType "0" to go back.`
     );
   }
 
-  // ---------------------------
-  // SMS FLOW
-  // ---------------------------
+  // --------- SMS Flow ---------
   if (session[sender]?.step === 'main' && lower === '3') {
     session[sender].prevStep = 'main';
     session[sender].step = 'sms-category';
     return client.sendMessage(sender,
-      `✉️ *SMS Bundles*\nChoose a subcategory:\n` +
+      `✉️ *SMS Bundles*\nChoose a subcategory by typing the number:\n` +
       `1) Daily\n2) Weekly\n3) Monthly\n\n` +
       `Type "0" to go back, "00" for main menu.`
     );
@@ -504,7 +514,7 @@ client.on('message', async (msg) => {
     session[sender].smsCat = cat;
     let listMsg = `✅ *${cat.toUpperCase()} SMS Bundles:*\n`;
     smsPackages[cat].forEach((p) => {
-      listMsg += `[${p.id}] ${p.name} @ KES ${p.price} (${p.validity})\n`;
+      listMsg += `[${p.id}] ${p.name} @ KSH ${p.price} (${p.validity})\n`;
     });
     listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
     return client.sendMessage(sender, listMsg);
@@ -528,33 +538,29 @@ client.on('message', async (msg) => {
       recipient: null,
       payment: null,
       status: 'PENDING',
-      timestamp: new Date().toISOString(),
+      timestamp: new Date().toISOString()
     };
     delete session[sender];
     return client.sendMessage(sender,
       `🛒 *Order Created!*\n\n` +
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: ${selected.name} (SMS - ${cat})\n` +
-      `💰 Price: KES ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).`
+      `💰 Price: KSH ${selected.price}\n\n` +
+      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).\nType "0" to go back.`
     );
   }
 
-  // ---------------------------
-  // CAPTURE RECIPIENT
-  // ---------------------------
+  // ---------- Capture Recipient ----------
   const pendingRecipOrder = Object.values(orders).find(o => o.customer === sender && !o.recipient);
   if (pendingRecipOrder) {
     if (!isSafaricomNumber(body)) {
       return client.sendMessage(sender, '❌ Invalid phone number. Must be in the format 07XXXXXXXX or 01XXXXXXXX.');
     }
     pendingRecipOrder.recipient = body;
-    return client.sendMessage(sender, `✅ Recipient set to *${body}*.\nNow please enter your *payment number* (Safaricom).`);
+    return client.sendMessage(sender, `✅ Recipient set to *${body}*.\nNow please enter your *payment number* (Safaricom).\nType "0" to go back.`);
   }
 
-  // ---------------------------
-  // CAPTURE PAYMENT
-  // ---------------------------
+  // ---------- Capture Payment ----------
   const pendingPaymentOrder = Object.values(orders).find(o => o.customer === sender && o.recipient && !o.payment);
   if (pendingPaymentOrder) {
     if (!isSafaricomNumber(body)) {
@@ -573,7 +579,7 @@ client.on('message', async (msg) => {
       `Then type: *PAID ${order.orderID}* when done.\n\n` +
       `Type "0" to go back or "00" for main menu.`;
     client.sendMessage(sender, summary);
-    // Notify admin
+    // Notify admin with all details
     client.sendMessage(`${ADMIN_NUMBER}@c.us`,
       `🔔 *New Order Received!* 🔔\n\n` +
       `🆔 Order ID: ${order.orderID}\n` +
@@ -597,9 +603,7 @@ client.on('message', async (msg) => {
     return;
   }
 
-  // ---------------------------
-  // CONFIRM PAYMENT (User types "PAID <ORDER_ID>")
-  // ---------------------------
+  // ---------- Confirm Payment (User types "PAID <ORDER_ID>")
   if (lower.startsWith('paid ')) {
     const parts = body.split(' ');
     if (parts.length !== 2) {
@@ -610,14 +614,14 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
     }
     orders[orderID].status = 'CONFIRMED';
-    client.sendMessage(sender, `✅ Payment confirmed! Your order *${orderID}* is now *CONFIRMED*.\nThank you for choosing FYS PROPERTY! For help, call 0701339573.\nType "00" for main menu.`);
+    client.sendMessage(sender,
+      `✅ Payment confirmed!\nYour order *${orderID}* is now *CONFIRMED*.\n\n✨ Thank you for choosing FYS PROPERTY! We truly appreciate your trust. For any help, please call 0701339573.\n\nType "00" for the main menu.`
+    );
     client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 Order *${orderID}* marked as CONFIRMED by the user.`);
     return;
   }
 
-  // ---------------------------
-  // ORDER STATUS (User types "status <ORDER_ID>")
-  // ---------------------------
+  // ---------- Order Status (User types "status <ORDER_ID>")
   if (lower.startsWith('status ')) {
     const parts = body.split(' ');
     if (parts.length !== 2) {
@@ -641,13 +645,11 @@ client.on('message', async (msg) => {
     );
   }
 
-  // ---------------------------
-  // FALLBACK / HELP
-  // ---------------------------
+  // ---------- Fallback / Help Message ----------
   client.sendMessage(sender,
     `🤖 *FY'S ULTRA BOT*\n` +
     `Type "menu" to see the main menu.\n` +
-    `For order status, type: status <ORDER_ID>\n` +
+    `To check an order, type: status <ORDER_ID>\n` +
     `After payment, type: PAID <ORDER_ID>\n` +
     `Or type "0" for previous menu, "00" for main menu.`
   );
@@ -655,7 +657,7 @@ client.on('message', async (msg) => {
 
 /**
  * =============================
- * EXPRESS SERVER FOR QR CODE PAGE
+ * EXPRESS SERVER FOR WEB QR CODE
  * =============================
  */
 const app = express();
