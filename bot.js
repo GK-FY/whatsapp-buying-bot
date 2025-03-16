@@ -6,28 +6,41 @@ const express = require('express');
 
 /**
  * =============================
- * CONFIGURATION & GLOBALS
+ * CONFIGURATION & GLOBAL VARIABLES
  * =============================
  */
-const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254700000000'; 
-let PAYMENT_INFO = '0701339573 (Camlus)'; // M-Pesa details, admin can change via WhatsApp
+const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254701339573'; // Your admin number (without +)
+let PAYMENT_INFO = '0701339573 (Camlus)'; // Default payment info (M-Pesa details)
+const PORT = 3000; // Express server port
 
-// Generate unique order IDs
+// In-memory orders store (keys = orderID)
+const orders = {};
+
+// Minimal session object to handle user flow (key = sender)
+const session = {}; // e.g. { "2547xxxx@c.us": { step: 'main', prevStep: null, ... } }
+
+/**
+ * Helper: Generate a unique order ID in format FY'S-XXXXXX
+ */
 function generateOrderID() {
   return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
-// Validate Safaricom format
+/**
+ * Helper: Validate if a number is a valid Safaricom number (07xxxxxxx or 01xxxxxxx)
+ */
 function isSafaricomNumber(num) {
   return /^0[71]\d{8}$/.test(num) || /^01\d{8}$/.test(num);
 }
 
-// -----------------------------
-// PACKAGES (Airtime, Data, SMS)
-// -----------------------------
+/**
+ * =============================
+ * PACKAGES (Airtime, Data, SMS)
+ * =============================
+ */
+// Airtime: Let user type the amount they wish to purchase.
 
-// Airtime: We'll let user type the exact amount (no fixed packages).
-// Data => Hourly, Daily, Weekly, Monthly
+// Data Packages organized by subcategory
 const dataPackages = {
   hourly: [
     { id: 1, name: '1GB', price: 19, validity: '1 hour' },
@@ -49,28 +62,22 @@ const dataPackages = {
   ],
 };
 
-// SMS => Daily, Weekly, Monthly
+// SMS Packages organized by subcategory
 const smsPackages = {
   daily: [
-    { id: 1, name: '200 SMS', price: 10, validity: '1 day' },
+    { id: 1, name: '200 SMS', price: 10, validity: 'Daily' },
   ],
   weekly: [
-    { id: 1, name: '1000 SMS', price: 29, validity: '7 days' },
+    { id: 1, name: '1000 SMS', price: 29, validity: 'Weekly' },
   ],
   monthly: [
-    { id: 1, name: '2000 SMS', price: 99, validity: '30 days' },
+    { id: 1, name: '2000 SMS', price: 99, validity: 'Monthly' },
   ],
 };
 
-// Orders stored in memory (keys = orderID)
-const orders = {};
-
-// Minimal user session
-const session = {}; // e.g. { "2547XXX@c.us": { step: "...", data: ... } }
-
 /**
  * =============================
- * WHATSAPP CLIENT
+ * WHATSAPP CLIENT SETUP
  * =============================
  */
 const client = new Client({
@@ -78,311 +85,317 @@ const client = new Client({
   puppeteer: { headless: true },
 });
 
-let qrImageUrl = null; // data URL for web-based QR
+let qrImageUrl = null; // Will hold QR code as a data URL
 
-// Generate QR in terminal + store for Express
 client.on('qr', (qr) => {
-  console.log('Scan this QR code to link your WhatsApp:');
+  console.log('🔐 Scan the QR code below with WhatsApp:');
   qrcodeTerminal.generate(qr, { small: true });
+  // Also store as a data URL for the Express web page:
   QRCode.toDataURL(qr, (err, url) => {
     if (!err) qrImageUrl = url;
   });
 });
 
-// When the bot is ready
 client.on('ready', async () => {
   console.log('✅ Bot is online and ready!');
-
-  // Send a welcome message to admin if desired
-  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! Your bot is now online. Type "menu" to see user flow or try admin commands (e.g., set payment, add data, etc.).`);
+  // Optionally, notify admin that the bot is live.
+  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live. Type "menu" for user flow or use admin commands.`);
 });
 
 /**
  * =============================
  * ADMIN COMMANDS
  * =============================
- * Admin can:
+ * Only the admin (your number) can execute the following:
  * 1) update <ORDER_ID> <STATUS>
- * 2) set payment <mpesa_number> <name in quotes>
- * 3) add data <hourly/daily/weekly/monthly> "<name>" <price> "<validity>"
- * 4) remove data <hourly/daily/weekly/monthly> <id>
- * 5) edit data <hourly/daily/weekly/monthly> <id> <newprice>
- * (similar for sms => add sms <daily/weekly/monthly> ...)
+ * 2) set payment <mpesa_number> "<Name>"
+ * 3) add data <subcat> "<name>" <price> "<validity>"
+ * 4) remove data <subcat> <id>
+ * 5) edit data <subcat> <id> <newprice>
+ * 6) add sms <subcat> "<name>" <price> "<validity>"
+ * 7) remove sms <subcat> <id>
+ * 8) edit sms <subcat> <id> <newprice>
+ * 9) search <ORDER_ID>
  */
-function parseQuotedString(parts, fromIndex) {
-  // Joins everything from fromIndex and tries to parse "quoted" segments
-  // e.g. ["add","data","daily","\"250MB\"","20","\"24 hours\""]
-  // becomes name="250MB", price=20, validity="24 hours"
-  let final = [];
-  let current = [];
-  let inQuotes = false;
-
+function parseQuotedParts(parts, fromIndex) {
+  // Simple parser to join quoted strings
+  let result = [];
+  let current = '';
+  let inQuote = false;
   for (let i = fromIndex; i < parts.length; i++) {
-    let p = parts[i];
-    if (p.startsWith('"') && !p.endsWith('"')) {
-      // start quotes
-      inQuotes = true;
-      current.push(p.substring(1)); // remove first quote
-    } else if (p.endsWith('"') && inQuotes) {
-      // end quotes
-      inQuotes = false;
-      current.push(p.slice(0, -1)); // remove last quote
-      final.push(current.join(' '));
-      current = [];
-    } else if (inQuotes) {
-      // middle of quoted text
-      current.push(p);
-    } else if (p.startsWith('"') && p.endsWith('"')) {
-      // single-word quoted
-      final.push(p.slice(1, -1));
+    let part = parts[i];
+    if (part.startsWith('"') && !part.endsWith('"')) {
+      inQuote = true;
+      current += part.slice(1) + ' ';
+    } else if (inQuote && part.endsWith('"')) {
+      inQuote = false;
+      current += part.slice(0, -1);
+      result.push(current.trim());
+      current = '';
+    } else if (inQuote) {
+      current += part + ' ';
+    } else if (part.startsWith('"') && part.endsWith('"')) {
+      result.push(part.slice(1, -1));
     } else {
-      // unquoted
-      final.push(p);
+      result.push(part);
     }
   }
-  return final;
+  return result;
 }
 
 client.on('message', async (msg) => {
-  const sender = msg.from; // e.g. "2547XXXX@c.us"
+  const sender = msg.from; // WhatsApp ID e.g. "2547xxxx@c.us"
   const body = msg.body.trim();
+  const lower = body.toLowerCase();
 
-  // -------------- ADMIN COMMANDS --------------
+  // -----------------------------
+  // ADMIN COMMANDS - Only from admin
+  // -----------------------------
   if (sender === `${ADMIN_NUMBER}@c.us`) {
-    const lower = body.toLowerCase();
-
-    // 1) update ORDER_ID STATUS
+    // Command: update <ORDER_ID> <STATUS>
     if (lower.startsWith('update ')) {
-      // e.g. "update FY'S-123456 completed"
       const parts = body.split(' ');
       if (parts.length < 3) {
         return client.sendMessage(sender, '❌ Usage: update <ORDER_ID> <STATUS>');
       }
       const orderID = parts[1];
       const newStatus = parts.slice(2).join(' ').toUpperCase();
-
       if (!orders[orderID]) {
         return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
       }
       orders[orderID].status = newStatus;
-
-      // Notify user
-      const userNumber = orders[orderID].customer;
+      // Send a beautiful update message to the user
       let extra = '';
-      switch (newStatus) {
-        case 'CONFIRMED': extra = '✅ Payment confirmed! Processing your order soon.'; break;
-        case 'COMPLETED': extra = '🎉 Your order is complete! Enjoy.'; break;
-        case 'CANCELLED': extra = '🚫 Your order was cancelled. Contact support if needed.'; break;
-        case 'REFUNDED': extra = '💰 Your order was refunded. Check your M-Pesa balance.'; break;
-        default: extra = '';
+      if (newStatus === 'CONFIRMED') {
+        extra = '✅ Your payment is confirmed! We are processing your order. Thank you for choosing FYS PROPERTY. For help, call 0701339573.';
+      } else if (newStatus === 'COMPLETED') {
+        extra = '🎉 Your order has been completed. We sincerely thank you for choosing FYS PROPERTY! Enjoy your purchase!';
+      } else if (newStatus === 'CANCELLED') {
+        extra = '🚫 Your order has been cancelled. Please contact support if you need further assistance.';
+      } else if (newStatus === 'REFUNDED') {
+        extra = '💰 Your order has been refunded. Please check your M-Pesa balance.';
+      } else {
+        extra = 'Your order status has been updated.';
       }
-      client.sendMessage(userNumber, `🔔 *Order Update*\nOrder *${orderID}* => *${newStatus}*\n${extra}`);
-      return client.sendMessage(sender, `✅ Updated ${orderID} to ${newStatus}.`);
+      client.sendMessage(orders[orderID].customer, `🔔 *Order Update*\nOrder *${orderID}* is now *${newStatus}*.\n${extra}\n\nReply with "0" to go back or "00" for main menu.`);
+      return client.sendMessage(sender, `✅ Order *${orderID}* updated to *${newStatus}* successfully.`);
     }
 
-    // 2) set payment <mpesa_number> <name in quotes>
-    // e.g. "set payment 0712345678 "Camlus 2.0""
+    // Command: set payment <mpesa_number> "<Name>"
     if (lower.startsWith('set payment ')) {
-      const parts = parseQuotedString(msg.body.split(' '), 2); 
-      // parts might be like ["0712345678", "Camlus 2.0"]
+      const parts = parseQuotedParts(body.split(' '), 2);
       if (parts.length < 2) {
-        return client.sendMessage(sender, '❌ Usage: set payment <mpesa_number> "<name>"');
+        return client.sendMessage(sender, '❌ Usage: set payment <mpesa_number> "<Name>"');
       }
-      const mpesaNum = parts[0];
+      const mpesa = parts[0];
       const name = parts[1];
-      PAYMENT_INFO = `${mpesaNum} (${name})`;
+      PAYMENT_INFO = `${mpesa} (${name})`;
       return client.sendMessage(sender, `✅ Payment info updated to: ${PAYMENT_INFO}`);
     }
 
-    // 3) add data or sms
-    // e.g. "add data daily "250MB" 20 "24 hours""
-    // or   "add sms weekly "500 SMS" 50 "7 days""
-    if (lower.startsWith('add data ') || lower.startsWith('add sms ')) {
-      // parse: "add data daily "250MB" 20 "24 hours""
-      // parts => ["add","data","daily","\"250MB\"","20","\"24","hours\""] => we parse carefully
-      const splitted = msg.body.split(' ');
-      // splitted[0] = "add"
-      // splitted[1] = "data" or "sms"
-      // splitted[2] = "daily"/"hourly"/...
-      const type = splitted[1].toLowerCase(); // "data" or "sms"
-      const category = splitted[2].toLowerCase();
-
-      // parse the rest
-      // we expect: "<name>" <price> "<validity>"
-      const rest = parseQuotedString(splitted, 3); 
-      // e.g. ["250MB", "20", "24 hours"]
-
-      if (rest.length < 3) {
-        return client.sendMessage(sender, `❌ Usage: add ${type} <category> "<name>" <price> "<validity>"`);
+    // Command: add data <subcat> "<name>" <price> "<validity>"
+    if (lower.startsWith('add data ')) {
+      const parts = parseQuotedParts(body.split(' '), 2);
+      // parts[0]: subcat, parts[1]: name, parts[2]: price, parts[3]: validity
+      if (parts.length < 4) {
+        return client.sendMessage(sender, '❌ Usage: add data <subcat> "<name>" <price> "<validity>"');
       }
-      const name = rest[0];
-      const price = Number(rest[1]);
-      const validity = rest[2];
-
+      const subcat = parts[0].toLowerCase();
+      const name = parts[1];
+      const price = Number(parts[2]);
+      const validity = parts[3];
       if (isNaN(price)) {
-        return client.sendMessage(sender, '❌ Invalid price. Must be a number.');
+        return client.sendMessage(sender, '❌ Price must be a number.');
       }
-
-      // Add to dataPackages[category] or smsPackages[category]
-      let target;
-      if (type === 'data') {
-        if (!dataPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid data category: ${category}`);
-        }
-        const arr = dataPackages[category];
-        const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
-        arr.push({ id: newId, name, price, validity });
-        return client.sendMessage(sender, `✅ Added new data package: [${newId}] ${name} @ KES ${price} (${validity}) to ${category}.`);
-      } else {
-        // sms
-        if (!smsPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid sms category: ${category}`);
-        }
-        const arr = smsPackages[category];
-        const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
-        arr.push({ id: newId, name, price, validity });
-        return client.sendMessage(sender, `✅ Added new SMS package: [${newId}] ${name} @ KES ${price} (${validity}) to ${category}.`);
+      if (!dataPackages[subcat]) {
+        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found. Options: hourly, daily, weekly, monthly.`);
       }
+      const arr = dataPackages[subcat];
+      const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
+      arr.push({ id: newId, name, price, validity });
+      return client.sendMessage(sender, `✅ Added new data package: [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
     }
 
-    // 4) remove data or sms
-    // e.g. "remove data daily 2"
-    // e.g. "remove sms weekly 1"
-    if (lower.startsWith('remove data ') || lower.startsWith('remove sms ')) {
-      const splitted = msg.body.split(' ');
-      // splitted => ["remove","data","daily","2"]
-      if (splitted.length < 4) {
-        return client.sendMessage(sender, '❌ Usage: remove data|sms <category> <id>');
+    // Command: remove data <subcat> <id>
+    if (lower.startsWith('remove data ')) {
+      const parts = body.split(' ');
+      if (parts.length < 4) {
+        return client.sendMessage(sender, '❌ Usage: remove data <subcat> <id>');
       }
-      const type = splitted[1].toLowerCase(); // data or sms
-      const category = splitted[2].toLowerCase();
-      const idToRemove = Number(splitted[3]);
-
+      const subcat = parts[2].toLowerCase();
+      const idToRemove = Number(parts[3]);
       if (isNaN(idToRemove)) {
-        return client.sendMessage(sender, '❌ Invalid ID. Must be a number.');
+        return client.sendMessage(sender, '❌ ID must be a number.');
       }
-
-      if (type === 'data') {
-        if (!dataPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid data category: ${category}`);
-        }
-        const arr = dataPackages[category];
-        const idx = arr.findIndex(p => p.id === idToRemove);
-        if (idx === -1) {
-          return client.sendMessage(sender, `❌ No package with ID ${idToRemove} in ${category}.`);
-        }
-        arr.splice(idx, 1);
-        return client.sendMessage(sender, `✅ Removed data package ID ${idToRemove} from ${category}.`);
-      } else {
-        // sms
-        if (!smsPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid sms category: ${category}`);
-        }
-        const arr = smsPackages[category];
-        const idx = arr.findIndex(p => p.id === idToRemove);
-        if (idx === -1) {
-          return client.sendMessage(sender, `❌ No SMS package with ID ${idToRemove} in ${category}.`);
-        }
-        arr.splice(idx, 1);
-        return client.sendMessage(sender, `✅ Removed SMS package ID ${idToRemove} from ${category}.`);
+      if (!dataPackages[subcat]) {
+        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found.`);
       }
+      const arr = dataPackages[subcat];
+      const idx = arr.findIndex(p => p.id === idToRemove);
+      if (idx === -1) {
+        return client.sendMessage(sender, `❌ No package with ID ${idToRemove} in ${subcat}.`);
+      }
+      arr.splice(idx, 1);
+      return client.sendMessage(sender, `✅ Removed data package ID ${idToRemove} from ${subcat}.`);
     }
 
-    // 5) edit data or sms
-    // e.g. "edit data daily 2 120" => changes price of ID=2 to 120
-    if (lower.startsWith('edit data ') || lower.startsWith('edit sms ')) {
-      const splitted = msg.body.split(' ');
-      // splitted => ["edit","data","daily","2","120"]
-      if (splitted.length < 5) {
-        return client.sendMessage(sender, '❌ Usage: edit data|sms <category> <id> <newprice>');
+    // Command: edit data <subcat> <id> <newprice>
+    if (lower.startsWith('edit data ')) {
+      const parts = body.split(' ');
+      if (parts.length < 5) {
+        return client.sendMessage(sender, '❌ Usage: edit data <subcat> <id> <newprice>');
       }
-      const type = splitted[1].toLowerCase();
-      const category = splitted[2].toLowerCase();
-      const idToEdit = Number(splitted[3]);
-      const newPrice = Number(splitted[4]);
-
+      const subcat = parts[2].toLowerCase();
+      const idToEdit = Number(parts[3]);
+      const newPrice = Number(parts[4]);
       if (isNaN(idToEdit) || isNaN(newPrice)) {
-        return client.sendMessage(sender, '❌ Invalid ID or price. Must be numbers.');
+        return client.sendMessage(sender, '❌ ID and price must be numbers.');
       }
+      if (!dataPackages[subcat]) {
+        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found.`);
+      }
+      const pack = dataPackages[subcat].find(p => p.id === idToEdit);
+      if (!pack) {
+        return client.sendMessage(sender, `❌ No package with ID ${idToEdit} in ${subcat}.`);
+      }
+      pack.price = newPrice;
+      return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
+    }
 
-      if (type === 'data') {
-        if (!dataPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid data category: ${category}`);
-        }
-        const arr = dataPackages[category];
-        const pack = arr.find(p => p.id === idToEdit);
-        if (!pack) {
-          return client.sendMessage(sender, `❌ No data package with ID ${idToEdit} in ${category}.`);
-        }
-        pack.price = newPrice;
-        return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] to price KES ${newPrice}.`);
-      } else {
-        if (!smsPackages[category]) {
-          return client.sendMessage(sender, `❌ Invalid sms category: ${category}`);
-        }
-        const arr = smsPackages[category];
-        const pack = arr.find(p => p.id === idToEdit);
-        if (!pack) {
-          return client.sendMessage(sender, `❌ No SMS package with ID ${idToEdit} in ${category}.`);
-        }
-        pack.price = newPrice;
-        return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] to price KES ${newPrice}.`);
+    // Similar commands for SMS:
+    if (lower.startsWith('add sms ')) {
+      const parts = parseQuotedParts(body.split(' '), 2);
+      if (parts.length < 4) {
+        return client.sendMessage(sender, '❌ Usage: add sms <subcat> "<name>" <price> "<validity>"');
       }
+      const subcat = parts[0].toLowerCase();
+      const name = parts[1];
+      const price = Number(parts[2]);
+      const validity = parts[3];
+      if (isNaN(price)) {
+        return client.sendMessage(sender, '❌ Price must be a number.');
+      }
+      if (!smsPackages[subcat]) {
+        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found. Options: daily, weekly, monthly.`);
+      }
+      const arr = smsPackages[subcat];
+      const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
+      arr.push({ id: newId, name, price, validity });
+      return client.sendMessage(sender, `✅ Added new SMS package: [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
+    }
+    if (lower.startsWith('remove sms ')) {
+      const parts = body.split(' ');
+      if (parts.length < 4) {
+        return client.sendMessage(sender, '❌ Usage: remove sms <subcat> <id>');
+      }
+      const subcat = parts[2].toLowerCase();
+      const idToRemove = Number(parts[3]);
+      if (isNaN(idToRemove)) {
+        return client.sendMessage(sender, '❌ ID must be a number.');
+      }
+      if (!smsPackages[subcat]) {
+        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found.`);
+      }
+      const arr = smsPackages[subcat];
+      const idx = arr.findIndex(p => p.id === idToRemove);
+      if (idx === -1) {
+        return client.sendMessage(sender, `❌ No SMS package with ID ${idToRemove} in ${subcat}.`);
+      }
+      arr.splice(idx, 1);
+      return client.sendMessage(sender, `✅ Removed SMS package ID ${idToRemove} from ${subcat}.`);
+    }
+    if (lower.startsWith('edit sms ')) {
+      const parts = body.split(' ');
+      if (parts.length < 5) {
+        return client.sendMessage(sender, '❌ Usage: edit sms <subcat> <id> <newprice>');
+      }
+      const subcat = parts[2].toLowerCase();
+      const idToEdit = Number(parts[3]);
+      const newPrice = Number(parts[4]);
+      if (isNaN(idToEdit) || isNaN(newPrice)) {
+        return client.sendMessage(sender, '❌ ID and price must be numbers.');
+      }
+      if (!smsPackages[subcat]) {
+        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found.`);
+      }
+      const pack = smsPackages[subcat].find(p => p.id === idToEdit);
+      if (!pack) {
+        return client.sendMessage(sender, `❌ No SMS package with ID ${idToEdit} in ${subcat}.`);
+      }
+      pack.price = newPrice;
+      return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
+    }
+
+    // 9) Search order: "search <ORDER_ID>"
+    if (lower.startsWith('search ')) {
+      const parts = body.split(' ');
+      if (parts.length !== 2) {
+        return client.sendMessage(sender, '❌ Usage: search <ORDER_ID>');
+      }
+      const orderID = parts[1];
+      if (!orders[orderID]) {
+        return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
+      }
+      const o = orders[orderID];
+      return client.sendMessage(sender,
+        `🔍 *Order Details*\n\n` +
+        `🆔 Order ID: ${o.orderID}\n` +
+        `📦 Package: ${o.package}\n` +
+        `💰 Amount: KSH ${o.amount}\n` +
+        `📞 Recipient: ${o.recipient}\n` +
+        `📱 Payment: ${o.payment}\n` +
+        `📌 Status: ${o.status}\n` +
+        `🕒 Placed at: ${new Date(o.timestamp).toLocaleString()}`
+      );
     }
   } // END ADMIN COMMANDS
 
-  // -------------- USER FLOW --------------
-  const lower = body.toLowerCase();
+  // -----------------------------
+  // USER FLOW
+  // -----------------------------
+  // Allow users to type "0" to go back to the previous menu, "00" for main menu.
+  if (body === '0') {
+    // Go back: if session has a previous step stored, revert; otherwise, go to main.
+    if (session[sender] && session[sender].prevStep) {
+      session[sender].step = session[sender].prevStep;
+      return client.sendMessage(sender, '🔙 Going back to previous menu...');
+    } else {
+      session[sender] = { step: 'main' };
+      return client.sendMessage(sender, '🏠 Returning to main menu...');
+    }
+  }
+  if (body === '00') {
+    session[sender] = { step: 'main' };
+    return client.sendMessage(sender, '🏠 Returning to main menu...');
+  }
 
-  // "menu" or "start"
+  // Main Menu
   if (lower === 'menu' || lower === 'start') {
     session[sender] = { step: 'main' };
     const welcomeMsg = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟\n\n` +
-      `I can help you purchase *Airtime, Data bundles, or SMS bundles*.\n` +
-      `Please choose an option (type the number):\n\n` +
+      `Thank you for choosing FYS PROPERTY! We are here to serve you with the best offers.\n\n` +
+      `Please choose an option by typing a number:\n` +
       `1️⃣ Airtime\n` +
       `2️⃣ Data Bundles\n` +
       `3️⃣ SMS Bundles\n\n` +
-      `You can also check an order status with: status <ORDER_ID>\n` +
-      `Or confirm payment with: PAID <ORDER_ID>\n`;
+      `For order status, type: status <ORDER_ID>\n` +
+      `Or if you've paid, type: PAID <ORDER_ID>\n`;
     return client.sendMessage(sender, welcomeMsg);
-  }
-
-  // If user is at main step
-  if (session[sender]?.step === 'main') {
-    if (lower === '1') {
-      // Airtime
-      session[sender].step = 'airtime';
-      return client.sendMessage(sender, '💳 *Airtime Purchase*\n\nEnter the amount of airtime (e.g. "50" for KES 50).');
-    } else if (lower === '2') {
-      // Data
-      session[sender].step = 'data-category';
-      return client.sendMessage(sender,
-        `📶 *Data Bundles*\nChoose a subcategory:\n` +
-        `1) Hourly\n2) Daily\n3) Weekly\n4) Monthly\n(Type 1,2,3, or 4)`
-      );
-    } else if (lower === '3') {
-      // SMS
-      session[sender].step = 'sms-category';
-      return client.sendMessage(sender,
-        `✉️ *SMS Bundles*\nChoose a subcategory:\n` +
-        `1) Daily\n2) Weekly\n3) Monthly\n(Type 1,2, or 3)`
-      );
-    } else {
-      return client.sendMessage(sender, '❌ Invalid choice. Type "menu" to restart.');
-    }
   }
 
   // ---------------------------
   // AIRTIME FLOW
   // ---------------------------
+  if (session[sender]?.step === 'main' && lower === '1') {
+    session[sender].prevStep = 'main';
+    session[sender].step = 'airtime';
+    return client.sendMessage(sender, '💳 *Airtime Purchase*\n\nPlease enter the amount (e.g., "50" for KES 50):');
+  }
   if (session[sender]?.step === 'airtime') {
-    // user typed an amount?
     const amt = Number(body);
     if (isNaN(amt) || amt <= 0) {
-      return client.sendMessage(sender, '❌ Invalid amount. Please enter a positive number (e.g. "50").');
+      return client.sendMessage(sender, '❌ Invalid amount. Please enter a positive number (e.g., "50").');
     }
-    // Create an order
     const orderID = generateOrderID();
     orders[orderID] = {
       orderID,
@@ -400,47 +413,51 @@ client.on('message', async (msg) => {
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: Airtime (KES ${amt})\n` +
       `💰 Price: KES ${amt}\n\n` +
-      `👉 Please enter the *recipient phone number* (07XXXXXXXX).`
+      `👉 Please enter the *recipient phone number* (Safaricom, e.g., 07XXXXXXXX):`
     );
   }
 
   // ---------------------------
   // DATA FLOW
   // ---------------------------
+  if (session[sender]?.step === 'main' && lower === '2') {
+    session[sender].prevStep = 'main';
+    session[sender].step = 'data-category';
+    return client.sendMessage(sender,
+      `📶 *Data Bundles*\nChoose a subcategory by typing the number:\n` +
+      `1) Hourly\n2) Daily\n3) Weekly\n4) Monthly\n\n` +
+      `Type "0" to go back, or "00" for main menu.`
+    );
+  }
   if (session[sender]?.step === 'data-category') {
     if (!['1','2','3','4'].includes(lower)) {
-      return client.sendMessage(sender, '❌ Invalid subcategory. Type 1,2,3, or 4.');
+      return client.sendMessage(sender, '❌ Invalid choice. Please type 1,2,3, or 4.');
     }
     let cat = '';
     if (lower === '1') cat = 'hourly';
     else if (lower === '2') cat = 'daily';
     else if (lower === '3') cat = 'weekly';
     else if (lower === '4') cat = 'monthly';
-
-    session[sender].dataCat = cat;
+    session[sender].prevStep = 'data-category';
     session[sender].step = 'data-list';
-
-    // Show packages
+    session[sender].dataCat = cat;
     let listMsg = `✅ *${cat.toUpperCase()} Data Bundles:*\n`;
     dataPackages[cat].forEach((p) => {
       listMsg += `[${p.id}] ${p.name} @ KES ${p.price} (${p.validity})\n`;
     });
-    listMsg += `\nType the package ID to buy (e.g. "1").`;
+    listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
     return client.sendMessage(sender, listMsg);
   }
-
   if (session[sender]?.step === 'data-list') {
     const cat = session[sender].dataCat;
     const pkgId = Number(body);
     if (isNaN(pkgId)) {
-      return client.sendMessage(sender, '❌ Invalid ID. Type a number (e.g. "1").');
+      return client.sendMessage(sender, '❌ Invalid package ID. Please type a number.');
     }
     const selected = dataPackages[cat].find(p => p.id === pkgId);
     if (!selected) {
       return client.sendMessage(sender, '❌ No package with that ID. Type "menu" to restart.');
     }
-
-    // Create order
     const orderID = generateOrderID();
     orders[orderID] = {
       orderID,
@@ -452,55 +469,56 @@ client.on('message', async (msg) => {
       status: 'PENDING',
       timestamp: new Date().toISOString(),
     };
-
-    // Clear session
     delete session[sender];
-
     return client.sendMessage(sender,
       `🛒 *Order Created!*\n\n` +
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: ${selected.name} (${cat})\n` +
       `💰 Price: KES ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (07XXXXXXXX).`
+      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).`
     );
   }
 
   // ---------------------------
   // SMS FLOW
   // ---------------------------
+  if (session[sender]?.step === 'main' && lower === '3') {
+    session[sender].prevStep = 'main';
+    session[sender].step = 'sms-category';
+    return client.sendMessage(sender,
+      `✉️ *SMS Bundles*\nChoose a subcategory:\n` +
+      `1) Daily\n2) Weekly\n3) Monthly\n\n` +
+      `Type "0" to go back, "00" for main menu.`
+    );
+  }
   if (session[sender]?.step === 'sms-category') {
     if (!['1','2','3'].includes(lower)) {
-      return client.sendMessage(sender, '❌ Invalid subcategory. Type 1,2, or 3.');
+      return client.sendMessage(sender, '❌ Invalid choice. Please type 1, 2, or 3.');
     }
     let cat = '';
     if (lower === '1') cat = 'daily';
     else if (lower === '2') cat = 'weekly';
     else if (lower === '3') cat = 'monthly';
-
-    session[sender].smsCat = cat;
+    session[sender].prevStep = 'sms-category';
     session[sender].step = 'sms-list';
-
-    // Show packages
+    session[sender].smsCat = cat;
     let listMsg = `✅ *${cat.toUpperCase()} SMS Bundles:*\n`;
     smsPackages[cat].forEach((p) => {
       listMsg += `[${p.id}] ${p.name} @ KES ${p.price} (${p.validity})\n`;
     });
-    listMsg += `\nType the package ID to buy (e.g. "1").`;
+    listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
     return client.sendMessage(sender, listMsg);
   }
-
   if (session[sender]?.step === 'sms-list') {
     const cat = session[sender].smsCat;
     const pkgId = Number(body);
     if (isNaN(pkgId)) {
-      return client.sendMessage(sender, '❌ Invalid ID. Type a number (e.g. "1").');
+      return client.sendMessage(sender, '❌ Invalid package ID. Please type a number.');
     }
     const selected = smsPackages[cat].find(p => p.id === pkgId);
     if (!selected) {
-      return client.sendMessage(sender, '❌ No package with that ID. Type "menu" to restart.');
+      return client.sendMessage(sender, '❌ No SMS package with that ID. Type "menu" to restart.');
     }
-
-    // Create order
     const orderID = generateOrderID();
     orders[orderID] = {
       orderID,
@@ -512,77 +530,75 @@ client.on('message', async (msg) => {
       status: 'PENDING',
       timestamp: new Date().toISOString(),
     };
-
-    // Clear session
     delete session[sender];
-
     return client.sendMessage(sender,
       `🛒 *Order Created!*\n\n` +
       `🆔 Order ID: *${orderID}*\n` +
       `📦 Package: ${selected.name} (SMS - ${cat})\n` +
       `💰 Price: KES ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (07XXXXXXXX).`
+      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).`
     );
   }
 
   // ---------------------------
   // CAPTURE RECIPIENT
   // ---------------------------
-  const needingRecip = Object.values(orders).find(o => o.customer === sender && o.recipient === null);
-  if (needingRecip) {
-    // Validate phone
+  const pendingRecipOrder = Object.values(orders).find(o => o.customer === sender && !o.recipient);
+  if (pendingRecipOrder) {
     if (!isSafaricomNumber(body)) {
-      return client.sendMessage(sender, '❌ Invalid phone. Must be 07XXXXXXXX or 01XXXXXXXX.');
+      return client.sendMessage(sender, '❌ Invalid phone number. Must be in the format 07XXXXXXXX or 01XXXXXXXX.');
     }
-    needingRecip.recipient = body;
-    return client.sendMessage(sender, `✅ Recipient set to ${body}.\nNow enter your *payment number* (Safaricom).`);
+    pendingRecipOrder.recipient = body;
+    return client.sendMessage(sender, `✅ Recipient set to *${body}*.\nNow please enter your *payment number* (Safaricom).`);
   }
 
   // ---------------------------
   // CAPTURE PAYMENT
   // ---------------------------
-  const needingPay = Object.values(orders).find(o => o.customer === sender && o.recipient && o.payment === null);
-  if (needingPay) {
+  const pendingPaymentOrder = Object.values(orders).find(o => o.customer === sender && o.recipient && !o.payment);
+  if (pendingPaymentOrder) {
     if (!isSafaricomNumber(body)) {
-      return client.sendMessage(sender, '❌ Invalid payment number. Must be 07XXXXXXXX or 01XXXXXXXX.');
+      return client.sendMessage(sender, '❌ Invalid payment number. Must be in the format 07XXXXXXXX or 01XXXXXXXX.');
     }
-    needingPay.payment = body;
-
-    // Summarize
-    const order = needingPay;
+    pendingPaymentOrder.payment = body;
+    const order = pendingPaymentOrder;
     const summary = `🎉 *Order Summary* 🎉\n\n` +
       `🆔 Order ID: *${order.orderID}*\n` +
       `📦 Package: *${order.package}*\n` +
       `💰 Amount: *KSH ${order.amount}*\n` +
       `📞 Recipient: *${order.recipient}*\n` +
       `📱 Payment Number: *${order.payment}*\n` +
-      `🕒 Time: ${new Date(order.timestamp).toLocaleString()}\n\n` +
-      `👉 Send *KSH ${order.amount}* to *${PAYMENT_INFO}*\n` +
-      `Then type: *PAID ${order.orderID}* when done.`;
-
+      `🕒 Placed at: ${new Date(order.timestamp).toLocaleString()}\n\n` +
+      `👉 Please send *KSH ${order.amount}* to *${PAYMENT_INFO}*.\n` +
+      `Then type: *PAID ${order.orderID}* when done.\n\n` +
+      `Type "0" to go back or "00" for main menu.`;
     client.sendMessage(sender, summary);
-
     // Notify admin
     client.sendMessage(`${ADMIN_NUMBER}@c.us`,
-      `🔔 *New Order* 🔔\n\n` +
-      `🆔 ${order.orderID}\n` +
-      `📦 ${order.package}\n` +
-      `💰 KSH ${order.amount}\n` +
+      `🔔 *New Order Received!* 🔔\n\n` +
+      `🆔 Order ID: ${order.orderID}\n` +
+      `📦 Package: ${order.package}\n` +
+      `💰 Amount: KSH ${order.amount}\n` +
       `📞 Recipient: ${order.recipient}\n` +
-      `📱 Payment: ${order.payment}\n` +
+      `📱 Payment Number: ${order.payment}\n` +
+      `🕒 Time: ${new Date(order.timestamp).toLocaleString()}\n` +
       `User: ${sender}\n\n` +
       `*Admin Commands:*\n` +
       `update ${order.orderID} CONFIRMED\n` +
       `update ${order.orderID} COMPLETED\n` +
       `update ${order.orderID} REFUNDED\n` +
-      `update ${order.orderID} CANCELLED\n\n` +
-      `Or change payment details with: set payment <mpesa> "Name"`
+      `update ${order.orderID} CANCELLED\n` +
+      `set payment <mpesa> "Name"\n` +
+      `add data <subcat> "<name>" <price> "<validity>"\n` +
+      `remove data <subcat> <id>\n` +
+      `edit data <subcat> <id> <newprice>\n` +
+      `search <ORDER_ID>`
     );
     return;
   }
 
   // ---------------------------
-  // PAID <ORDER_ID>
+  // CONFIRM PAYMENT (User types "PAID <ORDER_ID>")
   // ---------------------------
   if (lower.startsWith('paid ')) {
     const parts = body.split(' ');
@@ -594,13 +610,13 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
     }
     orders[orderID].status = 'CONFIRMED';
-    client.sendMessage(sender, `✅ Payment noted! Your order *${orderID}* is now *CONFIRMED*.\nWe’ll process it shortly.`);
+    client.sendMessage(sender, `✅ Payment confirmed! Your order *${orderID}* is now *CONFIRMED*.\nThank you for choosing FYS PROPERTY! For help, call 0701339573.\nType "00" for main menu.`);
     client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 Order *${orderID}* marked as CONFIRMED by the user.`);
     return;
   }
 
   // ---------------------------
-  // STATUS <ORDER_ID>
+  // ORDER STATUS (User types "status <ORDER_ID>")
   // ---------------------------
   if (lower.startsWith('status ')) {
     const parts = body.split(' ');
@@ -614,29 +630,32 @@ client.on('message', async (msg) => {
     const o = orders[orderID];
     return client.sendMessage(sender,
       `📦 *Order Status*\n\n` +
-      `🆔 ${o.orderID}\n` +
-      `📦 ${o.package}\n` +
-      `💰 KSH ${o.amount}\n` +
+      `🆔 Order ID: ${o.orderID}\n` +
+      `📦 Package: ${o.package}\n` +
+      `💰 Amount: KSH ${o.amount}\n` +
       `📞 Recipient: ${o.recipient}\n` +
       `📱 Payment: ${o.payment}\n` +
-      `📌 Status: *${o.status}*`
+      `📌 Status: ${o.status}\n` +
+      `🕒 Placed at: ${new Date(o.timestamp).toLocaleString()}\n\n` +
+      `Type "0" to go back or "00" for main menu.`
     );
   }
 
   // ---------------------------
-  // FALLBACK
+  // FALLBACK / HELP
   // ---------------------------
   client.sendMessage(sender,
     `🤖 *FY'S ULTRA BOT*\n` +
     `Type "menu" to see the main menu.\n` +
-    `Or "status <ORDERID>" to check an order.\n` +
-    `Or "PAID <ORDERID>" after paying.\n`
+    `For order status, type: status <ORDER_ID>\n` +
+    `After payment, type: PAID <ORDER_ID>\n` +
+    `Or type "0" for previous menu, "00" for main menu.`
   );
 });
 
 /**
  * =============================
- * EXPRESS SERVER FOR WEB QR
+ * EXPRESS SERVER FOR QR CODE PAGE
  * =============================
  */
 const app = express();
@@ -644,10 +663,10 @@ const app = express();
 app.get('/', (req, res) => {
   res.send(`
     <html>
-      <head><title>WhatsApp Bot</title></head>
+      <head><title>FY'S ULTRA BOT</title></head>
       <body style="font-family: Arial; text-align: center;">
-        <h1>Welcome to FY'S Ultra Bot</h1>
-        <p>Visit <a href="/qr">/qr</a> to scan the QR code.</p>
+        <h1>Welcome to FY'S ULTRA BOT</h1>
+        <p>Visit <a href="/qr">/qr</a> to scan the QR code with WhatsApp.</p>
       </body>
     </html>
   `);
@@ -657,7 +676,7 @@ app.get('/qr', (req, res) => {
   if (qrImageUrl) {
     res.send(`
       <html>
-        <head><title>Scan QR</title></head>
+        <head><title>Scan QR Code</title></head>
         <body style="font-family: Arial; text-align: center;">
           <h1>Scan This QR Code with WhatsApp</h1>
           <img src="${qrImageUrl}" style="width:300px;height:300px" />
@@ -666,15 +685,17 @@ app.get('/qr', (req, res) => {
       </html>
     `);
   } else {
-    res.send(`<h1>QR Code not ready yet. Check console for updates.</h1>`);
+    res.send('<h1>QR Code not ready yet. Check console for updates.</h1>');
   }
 });
 
-app.listen(3000, () => {
-  console.log('🌐 Express server running at http://localhost:3000');
+app.listen(PORT, () => {
+  console.log(`🌐 Express server running at http://localhost:${PORT}`);
 });
 
 /**
- * Initialize the WhatsApp client
+ * =============================
+ * INITIALIZE WHATSAPP CLIENT
+ * =============================
  */
 client.initialize();
