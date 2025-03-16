@@ -1,78 +1,122 @@
 /**
- * Minimal WhatsApp Buying Bot
- * 
- * 1) npm install whatsapp-web.js qrcode-terminal dotenv
- * 2) Create .env with ADMIN_NUMBER (e.g. ADMIN_NUMBER=254701339573)
- * 3) node bot.js
- * 4) Scan the QR code in your terminal with WhatsApp
+ * WhatsApp Buying Bot
+ * ===================
+ * Features:
+ *  - Single-digit steps for Data & SMS
+ *  - Minimal flow: choose category -> pick bundle -> enter recipient -> payment -> done
+ *  - No database needed (in-memory orders)
+ *  - Admin commands to update orders
+ *  - Webpage QR code (http://localhost:3000/qr) for easy scanning
  */
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 require('dotenv').config();
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
+const express = require('express');
 
-// --- Configuration ---
-const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '+254701339573'; // Must match the format used by whatsapp-web.js
+// ---------------------------
+// Configuration
+// ---------------------------
+const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254701339573'; // e.g. "254701234567"
+const PAYMENT_INFO = '0701339573 (Camlus)'; // M-Pesa payment details
 
-// --- Data Bundles ---
-const dataBundles = {
-  daily: [
-    { id: 1, name: '1.25GB', price: 55, validity: 'Till Midnight' },
-    { id: 2, name: '1GB', price: 99, validity: '24 Hours' },
-    { id: 3, name: '250MB', price: 20, validity: '24 Hours' },
-  ],
-  hourly: [
-    { id: 1, name: '1GB', price: 19, validity: '1 Hour' },
-    { id: 2, name: '1.5GB', price: 49, validity: '3 Hours' },
-  ],
-  weekly: [
-    { id: 1, name: '6GB', price: 700, validity: '7 Days' },
-    { id: 2, name: '2.5GB', price: 300, validity: '7 Days' },
-    { id: 3, name: '350MB', price: 50, validity: '7 Days' },
-  ],
-  monthly: [
-    { id: 1, name: '1.2GB', price: 250, validity: '30 Days' },
-    { id: 2, name: '500MB', price: 100, validity: '30 Days' },
-  ],
+// In-memory sessions (for step-by-step user flow)
+const session = {};
+// In-memory orders (keys = orderID)
+const orders = {};
+
+// Web-based QR code data
+let qrImageUrl = null;
+
+// ---------------------------
+// Bundles & Packages
+// ---------------------------
+const dataCategories = {
+  1: {
+    label: 'Hourly',
+    bundles: [
+      { id: 1, name: '1GB', price: 19, validity: '1 Hour' },
+      { id: 2, name: '1.5GB', price: 49, validity: '3 Hours' },
+    ],
+  },
+  2: {
+    label: 'Daily',
+    bundles: [
+      { id: 1, name: '1.25GB', price: 55, validity: 'Till Midnight' },
+      { id: 2, name: '1GB', price: 99, validity: '24 Hours' },
+      { id: 3, name: '250MB', price: 20, validity: '24 Hours' },
+    ],
+  },
+  3: {
+    label: 'Weekly',
+    bundles: [
+      { id: 1, name: '6GB', price: 700, validity: '7 Days' },
+      { id: 2, name: '2.5GB', price: 300, validity: '7 Days' },
+      { id: 3, name: '350MB', price: 50, validity: '7 Days' },
+    ],
+  },
+  4: {
+    label: 'Monthly',
+    bundles: [
+      { id: 1, name: '1.2GB', price: 250, validity: '30 Days' },
+      { id: 2, name: '500MB', price: 100, validity: '30 Days' },
+    ],
+  },
 };
 
-// --- Orders stored in memory (object). Keys = orderID ---
-let orders = {};
+const smsCategories = {
+  1: { id: 1, name: '200 SMS', price: 10, validity: 'Daily' },
+  2: { id: 2, name: '1000 SMS', price: 29, validity: 'Weekly' },
+};
 
-// --- Generate Unique Order ID ---
+// ---------------------------
+// Helper Functions
+// ---------------------------
 function generateOrderID() {
-  return "FY'S-" + Math.floor(100000 + Math.random() * 900000);
+  return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
-// --- WhatsApp Client Setup ---
+function isSafaricomNumber(num) {
+  return /^0[71]\d{8}$/.test(num) || /^01\d{8}$/.test(num);
+}
+
+// ---------------------------
+// WhatsApp Client
+// ---------------------------
 const client = new Client({
-  authStrategy: new LocalAuth(),  // stores session data locally
-  puppeteer: { headless: true }
+  authStrategy: new LocalAuth(),
+  puppeteer: { headless: true },
 });
 
-// --- QR Code Event ---
-client.on('qr', qr => {
-  console.log('Scan this QR code with your WhatsApp:');
-  qrcode.generate(qr, { small: true });
+// On QR event, store as data URL + print in terminal
+client.on('qr', (qr) => {
+  // Terminal display
+  console.log('Scan the QR code below (or visit /qr to see it in the browser):');
+  qrcodeTerminal.generate(qr, { small: true });
+
+  // Web-based QR
+  QRCode.toDataURL(qr, (err, url) => {
+    if (!err) qrImageUrl = url;
+  });
 });
 
-// --- Ready Event ---
 client.on('ready', () => {
-  console.log('✅ Bot is online and ready to receive messages!');
+  console.log('✅ Bot is online and ready!');
 });
 
-// --- Handle Incoming Messages ---
-client.on('message', async msg => {
-  const sender = msg.from;      // e.g. '254712345678@c.us'
-  const body = msg.body.trim().toLowerCase();
+// ---------------------------
+// Handle Incoming Messages
+// ---------------------------
+client.on('message', async (message) => {
+  const sender = message.from; // e.g. "2547XXXXXXX@c.us"
+  const text = message.body.trim();
 
-  // -------------------------
-  // ADMIN COMMANDS
-  // -------------------------
+  // ========== ADMIN COMMANDS ==========
   if (sender === ADMIN_NUMBER) {
-    // Update order status: "update FY'S-123456 confirmed"
-    if (body.startsWith('update ')) {
-      const parts = msg.body.split(' ');
+    // e.g. "update FY'S-123456 confirmed"
+    if (text.toLowerCase().startsWith('update ')) {
+      const parts = text.split(' ');
       if (parts.length < 3) {
         return client.sendMessage(sender, '❌ Usage: update <ORDER_ID> <STATUS>');
       }
@@ -85,187 +129,279 @@ client.on('message', async msg => {
 
       orders[orderID].status = newStatus;
       const user = orders[orderID].customer;
-
-      // Notify user about the update
       let extraMsg = '';
-      if (newStatus === 'CONFIRMED') extraMsg = '✅ We have confirmed your payment and will process your bundle soon.';
-      else if (newStatus === 'COMPLETED') extraMsg = '🎉 Your order is completed! Enjoy your data bundle.';
-      else if (newStatus === 'CANCELLED') extraMsg = '🚫 Your order was cancelled. Contact support if you have questions.';
-      else if (newStatus === 'REFUNDED') extraMsg = '💰 Your order was refunded. Check your M-Pesa balance.';
-
-      client.sendMessage(user, `🔔 *Order Update*\nYour order *${orderID}* status is now: *${newStatus}*\n${extraMsg}`);
-      return client.sendMessage(sender, `✅ Updated *${orderID}* to *${newStatus}*.`);
-    }
-  }
-
-  // -------------------------
-  // USER COMMANDS
-  // -------------------------
-  // Start or Menu
-  if (body === 'start' || body === 'menu') {
-    const menuMsg = `🎉 *Welcome to FY'S Buying Bot!* 🎉\n\n` +
-                    `Select what you'd like to do:\n` +
-                    `1️⃣ Buy Data Bundles\n` +
-                    `2️⃣ (Coming soon) Buy Airtime\n` +
-                    `3️⃣ (Coming soon) Buy SMS\n\n` +
-                    `Reply with the number (e.g. "1") to proceed.`;
-    return client.sendMessage(sender, menuMsg);
-  }
-
-  // If user typed "1" -> Data Bundles
-  if (body === '1') {
-    const dataMsg = `📊 *Data Bundles*\n\n` +
-                    `- "hourly"  : Hourly Bundles\n` +
-                    `- "daily"   : Daily Bundles\n` +
-                    `- "weekly"  : Weekly Bundles\n` +
-                    `- "monthly" : Monthly Bundles\n\n` +
-                    `Type the one you want, e.g. "daily" or "monthly".`;
-    return client.sendMessage(sender, dataMsg);
-  }
-
-  // If user typed one of these: "hourly", "daily", "weekly", "monthly"
-  if (['hourly', 'daily', 'weekly', 'monthly'].includes(body)) {
-    const chosen = dataBundles[body];
-    if (!chosen) {
-      return client.sendMessage(sender, '❌ Invalid category. Type "hourly", "daily", "weekly", or "monthly".');
-    }
-    let bundleList = `✅ *${body.toUpperCase()} BUNDLES:*\n\n`;
-    chosen.forEach(b => {
-      bundleList += `• ${b.id}. ${b.name} @ KSH ${b.price} (Valid for ${b.validity})\n`;
-    });
-    bundleList += `\nType the bundle number (e.g. "1") to choose.`;
-    // Store the user's current selection in a "session"
-    orders[sender] = { step: 'select_bundle', category: body };
-    return client.sendMessage(sender, bundleList);
-  }
-
-  // If user is in step "select_bundle" and typed a number
-  if (orders[sender]?.step === 'select_bundle') {
-    const category = orders[sender].category;
-    const chosenBundle = dataBundles[category].find(b => b.id === Number(body));
-    if (!chosenBundle) {
-      return client.sendMessage(sender, '❌ Invalid bundle number. Please try again.');
-    }
-
-    // Create a new order ID
-    const orderID = generateOrderID();
-    orders[orderID] = {
-      orderID,
-      customer: sender,
-      package: `${chosenBundle.name} (${category})`,
-      amount: chosenBundle.price,
-      recipient: null,
-      payment: null,
-      status: 'PENDING',
-      timestamp: new Date().toISOString()
-    };
-
-    // Clear the user's "session"
-    delete orders[sender];
-
-    // Prompt for recipient
-    return client.sendMessage(sender,
-      `🛒 *Order Created!* 🛒\n\n` +
-      `🆔 Order ID: *${orderID}*\n` +
-      `📦 Package: *${chosenBundle.name}* (${category})\n` +
-      `💰 Price: *KSH ${chosenBundle.price}*\n\n` +
-      `👉 Please enter the *recipient number* (Safaricom only, e.g. 07XXXXXXXX):`
-    );
-  }
-
-  // If user typed a Safaricom number (07XXXXXXXX or 01XXXXXXXX) & we find an order with no recipient
-  if (/^0[71]\d{8}$/.test(body)) {
-    // Find an order with PENDING recipient
-    const pendingOrder = Object.values(orders).find(o => o.customer === sender && o.recipient === null);
-    if (pendingOrder) {
-      pendingOrder.recipient = body;
-      return client.sendMessage(sender,
-        `✅ Recipient set to *${body}*.\n` +
-        `Please enter your *payment number* (Safaricom), e.g. 07XXXXXXXX:`
-      );
-    }
-
-    // If user typed a Safaricom number but there's no pending order
-    const noOrderMsg = `❌ No pending order found. Type "start" to begin.`;
-    return client.sendMessage(sender, noOrderMsg);
-  }
-
-  // If user typed a Safaricom number for payment & there's an order with no payment set
-  if (/^0[71]\d{8}$/.test(body)) {
-    const pendingOrder = Object.values(orders).find(o => o.customer === sender && o.recipient && o.payment === null);
-    if (pendingOrder) {
-      pendingOrder.payment = body;
-      // Summarize the order
-      const summary = `🎉 *Order Summary* 🎉\n\n` +
-                      `🆔 Order ID: *${pendingOrder.orderID}*\n` +
-                      `📦 Package: *${pendingOrder.package}*\n` +
-                      `💰 Amount: *KSH ${pendingOrder.amount}*\n` +
-                      `📞 Recipient: *${pendingOrder.recipient}*\n` +
-                      `📱 Payment Number: *${pendingOrder.payment}*\n\n` +
-                      `👉 *Send KSH ${pendingOrder.amount} to 0701339573 (Camlus)*\n` +
-                      `Then reply: *PAID ${pendingOrder.orderID}* when done.`;
-      client.sendMessage(sender, summary);
-
-      // Notify admin
-      const adminMsg = `🔔 *New Order!* 🔔\n\n` +
-                       `🆔 Order: ${pendingOrder.orderID}\n` +
-                       `📦 Package: ${pendingOrder.package}\n` +
-                       `💰 Amount: KSH ${pendingOrder.amount}\n` +
-                       `📞 Recipient: ${pendingOrder.recipient}\n` +
-                       `📱 Payment: ${pendingOrder.payment}\n` +
-                       `👤 User: ${sender}\n\n` +
-                       `*Admin Commands:* \n` +
-                       `update ${pendingOrder.orderID} CONFIRMED\n` +
-                       `update ${pendingOrder.orderID} COMPLETED\n` +
-                       `update ${pendingOrder.orderID} REFUNDED\n` +
-                       `update ${pendingOrder.orderID} CANCELLED\n`;
-      client.sendMessage(ADMIN_NUMBER, adminMsg);
+      switch (newStatus) {
+        case 'CONFIRMED':
+          extraMsg = '✅ Payment confirmed! We are processing your order soon.';
+          break;
+        case 'COMPLETED':
+          extraMsg = '🎉 Your order is now complete! Enjoy.';
+          break;
+        case 'CANCELLED':
+          extraMsg = '🚫 Your order was cancelled. Contact support if needed.';
+          break;
+        case 'REFUNDED':
+          extraMsg = '💰 Your order was refunded. Check your M-Pesa balance.';
+          break;
+        default:
+          extraMsg = '';
+      }
+      client.sendMessage(user, `🔔 *Order Update*\nOrder *${orderID}* status: *${newStatus}*\n${extraMsg}`);
+      client.sendMessage(sender, `✅ Order *${orderID}* updated to *${newStatus}*.`);
       return;
     }
   }
 
-  // If user types "PAID <ORDERID>"
-  if (body.startsWith('paid ')) {
-    const parts = body.split(' ');
+  // ========== USER FLOW ==========
+  // "menu" or "start"
+  if (text.toLowerCase() === 'menu' || text.toLowerCase() === 'start') {
+    session[sender] = { step: 'main' };
+    const menuMsg = `🎉 *Welcome to FY'S Buying Bot!* 🎉\n\n` +
+      `Select an option by typing a number:\n` +
+      `1️⃣ Buy Data Bundles\n` +
+      `2️⃣ Buy Airtime (Coming Soon)\n` +
+      `3️⃣ Buy SMS Bundles\n\n` +
+      `Type "status <ORDER_ID>" to check an existing order.\n` +
+      `Type "menu" any time to return here.`;
+    return client.sendMessage(sender, menuMsg);
+  }
+
+  // If user typed a single digit while on main step
+  if (session[sender]?.step === 'main') {
+    if (text === '1') {
+      // Data
+      session[sender].step = 'dataCategory';
+      return client.sendMessage(sender, `📊 *DATA BUNDLES*\nChoose validity:\n1) Hourly\n2) Daily\n3) Weekly\n4) Monthly`);
+    } else if (text === '2') {
+      // Airtime (coming soon)
+      return client.sendMessage(sender, '⚠️ Airtime purchase is *coming soon!* Type "menu" to go back.');
+    } else if (text === '3') {
+      // SMS
+      session[sender].step = 'smsCategory';
+      return client.sendMessage(sender, `✉️ *SMS BUNDLES*\n1) 200 SMS @ KES 10 (Daily)\n2) 1000 SMS @ KES 29 (Weekly)`);
+    } else {
+      return client.sendMessage(sender, '❌ Invalid option. Type "menu" to return.');
+    }
+  }
+
+  // ========== DATA FLOW ==========
+  if (session[sender]?.step === 'dataCategory') {
+    // text should be "1", "2", "3", or "4"
+    const catNum = Number(text);
+    if (![1, 2, 3, 4].includes(catNum)) {
+      return client.sendMessage(sender, '❌ Invalid data category. Type "menu" to return.');
+    }
+    session[sender].dataCat = catNum;
+    session[sender].step = 'dataBundleList';
+
+    const chosenCat = dataCategories[catNum];
+    let listMsg = `✅ *${chosenCat.label} Bundles*\n`;
+    chosenCat.bundles.forEach((b) => {
+      listMsg += `${b.id}) ${b.name} @ KES ${b.price} (${b.validity})\n`;
+    });
+    listMsg += '\nType the bundle number (e.g. "1").';
+    return client.sendMessage(sender, listMsg);
+  }
+
+  if (session[sender]?.step === 'dataBundleList') {
+    const catNum = session[sender].dataCat;
+    const chosenCat = dataCategories[catNum];
+    const bundleId = Number(text);
+    const selected = chosenCat.bundles.find((b) => b.id === bundleId);
+    if (!selected) {
+      return client.sendMessage(sender, '❌ Invalid bundle number. Type "menu" to return.');
+    }
+    // Create new order
+    const orderID = generateOrderID();
+    orders[orderID] = {
+      orderID,
+      customer: sender,
+      package: `${selected.name} (${chosenCat.label})`,
+      amount: selected.price,
+      recipient: null,
+      payment: null,
+      status: 'PENDING',
+      timestamp: new Date().toISOString(),
+    };
+
+    // Clear session
+    delete session[sender];
+
+    // Ask for recipient
+    return client.sendMessage(sender,
+      `🛒 *Order Created!* 🛒\n\n` +
+      `🆔 Order ID: *${orderID}*\n` +
+      `📦 Package: *${selected.name}* (${chosenCat.label})\n` +
+      `💰 Price: *KSH ${selected.price}*\n\n` +
+      `👉 Please enter the *recipient number* (Safaricom, e.g. 07XXXXXXXX):`
+    );
+  }
+
+  // ========== SMS FLOW ==========
+  if (session[sender]?.step === 'smsCategory') {
+    const choice = Number(text);
+    if (![1, 2].includes(choice)) {
+      return client.sendMessage(sender, '❌ Invalid SMS option. Type "menu" to return.');
+    }
+    const selected = smsCategories[choice];
+    const orderID = generateOrderID();
+    orders[orderID] = {
+      orderID,
+      customer: sender,
+      package: `${selected.name} (SMS - ${selected.validity})`,
+      amount: selected.price,
+      recipient: null,
+      payment: null,
+      status: 'PENDING',
+      timestamp: new Date().toISOString(),
+    };
+
+    // Clear session
+    delete session[sender];
+
+    // Ask for recipient
+    return client.sendMessage(sender,
+      `🛒 *Order Created!* 🛒\n\n` +
+      `🆔 Order ID: *${orderID}*\n` +
+      `📦 Package: *${selected.name}* (${selected.validity})\n` +
+      `💰 Price: *KSH ${selected.price}*\n\n` +
+      `👉 Please enter the *recipient number* (Safaricom, e.g. 07XXXXXXXX):`
+    );
+  }
+
+  // ========== CAPTURE RECIPIENT & PAYMENT ==========
+  // 1) If there's an order with no recipient
+  const pendingRecipOrder = Object.values(orders).find(
+    (o) => o.customer === sender && !o.recipient
+  );
+  if (pendingRecipOrder && isSafaricomNumber(text)) {
+    pendingRecipOrder.recipient = text;
+    return client.sendMessage(sender,
+      `✅ Recipient number set to *${text}*.\n` +
+      `Please enter your *payment number* (Safaricom):`
+    );
+  } else if (pendingRecipOrder && !isSafaricomNumber(text)) {
+    // If user typed something not recognized as a Safaricom # but we expect a recipient
+    return client.sendMessage(sender, '❌ Invalid number. Must be Safaricom (07XXXXXXX or 01XXXXXXX).');
+  }
+
+  // 2) If there's an order with a recipient but no payment
+  const pendingPaymentOrder = Object.values(orders).find(
+    (o) => o.customer === sender && o.recipient && !o.payment
+  );
+  if (pendingPaymentOrder && isSafaricomNumber(text)) {
+    pendingPaymentOrder.payment = text;
+    // Summarize
+    const order = pendingPaymentOrder;
+    const summary = `🎉 *Order Summary* 🎉\n\n` +
+      `🆔 Order ID: *${order.orderID}*\n` +
+      `📦 Package: *${order.package}*\n` +
+      `💰 Amount: *KSH ${order.amount}*\n` +
+      `📞 Recipient: *${order.recipient}*\n` +
+      `📱 Payment Number: *${order.payment}*\n` +
+      `🕒 Time: ${new Date(order.timestamp).toLocaleString()}\n\n` +
+      `👉 Send *KSH ${order.amount}* to *${PAYMENT_INFO}*\n` +
+      `Then type: *PAID ${order.orderID}* when done.`;
+    client.sendMessage(sender, summary);
+
+    // Notify admin
+    client.sendMessage(ADMIN_NUMBER,
+      `🔔 *New Order* 🔔\n\n` +
+      `🆔 *${order.orderID}*\n` +
+      `📦 ${order.package}\n` +
+      `💰 KSH ${order.amount}\n` +
+      `📞 Recipient: ${order.recipient}\n` +
+      `📱 Payment: ${order.payment}\n` +
+      `User: ${sender}\n\n` +
+      `*Admin Commands*:\n` +
+      `update ${order.orderID} CONFIRMED\n` +
+      `update ${order.orderID} COMPLETED\n` +
+      `update ${order.orderID} REFUNDED\n` +
+      `update ${order.orderID} CANCELLED\n`
+    );
+    return;
+  } else if (pendingPaymentOrder && !isSafaricomNumber(text)) {
+    return client.sendMessage(sender, '❌ Invalid payment number. Must be Safaricom (07XXXXXXX or 01XXXXXXX).');
+  }
+
+  // ========== PAID <ORDERID> ==========
+  if (text.toLowerCase().startsWith('paid ')) {
+    const parts = text.split(' ');
+    if (parts.length !== 2) {
+      return client.sendMessage(sender, '❌ Usage: PAID <ORDER_ID>');
+    }
     const orderID = parts[1];
     if (!orders[orderID]) {
       return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
     }
-    // Mark as "CONFIRMED"
     orders[orderID].status = 'CONFIRMED';
-    client.sendMessage(sender, `✅ Payment confirmed! Your order *${orderID}* will be processed shortly.`);
-    client.sendMessage(ADMIN_NUMBER, `🔔 Order *${orderID}* has been marked as CONFIRMED by the user.`);
+    client.sendMessage(sender, `✅ Payment noted! Your order *${orderID}* is now *CONFIRMED*.\nWe'll process it soon.`);
+    client.sendMessage(ADMIN_NUMBER, `🔔 Order *${orderID}* was marked as CONFIRMED by the user.`);
     return;
   }
 
-  // If user types "status <ORDERID>"
-  if (body.startsWith('status ')) {
-    const orderID = body.split(' ')[1];
+  // ========== STATUS <ORDERID> ==========
+  if (text.toLowerCase().startsWith('status ')) {
+    const parts = text.split(' ');
+    if (parts.length !== 2) {
+      return client.sendMessage(sender, '❌ Usage: status <ORDER_ID>');
+    }
+    const orderID = parts[1];
     if (!orders[orderID]) {
       return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
     }
     const o = orders[orderID];
     return client.sendMessage(sender,
       `📦 *Order Status*\n\n` +
-      `🆔 *${orderID}*\n` +
-      `📦 Package: ${o.package}\n` +
-      `💰 Amount: KSH ${o.amount}\n` +
+      `🆔 ${o.orderID}\n` +
+      `📦 ${o.package}\n` +
+      `💰 KSH ${o.amount}\n` +
       `📞 Recipient: ${o.recipient}\n` +
       `📱 Payment: ${o.payment}\n` +
       `📌 Status: *${o.status}*\n`
     );
   }
 
-  // Fallback / Help
-  if (!body.startsWith('update ') && !body.startsWith('paid ') && !body.startsWith('status ')) {
-    client.sendMessage(sender,
-      `🤖 *FY'S Buying Bot*\n\n` +
-      `Type *start* or *menu* to see the main menu.\n` +
-      `To check an order, type: *status <ORDERID>*\n` +
-      `If you've paid, type: *PAID <ORDERID>*`
-    );
-  }
+  // ========== Fallback ==========
+  client.sendMessage(sender,
+    `🤖 *FY'S Buying Bot*\n` +
+    `Type "menu" to view options.\n` +
+    `Or "status <ORDERID>" to check an order.\n` +
+    `Or "PAID <ORDERID>" after payment.`
+  );
 });
 
-// --- Initialize the client ---
+// ---------------------------
+// Express Server for QR Page
+// ---------------------------
+const app = express();
+app.get('/qr', (req, res) => {
+  if (qrImageUrl) {
+    return res.send(`
+      <html>
+        <head>
+          <title>WhatsApp Bot QR</title>
+        </head>
+        <body style="font-family:sans-serif;text-align:center;">
+          <h1>Scan This QR Code</h1>
+          <img src="${qrImageUrl}" alt="qr" style="width:300px;height:300px"/>
+          <p>Open WhatsApp > Linked Devices > Scan this code</p>
+        </body>
+      </html>
+    `);
+  } else {
+    return res.send('<h1>QR not available yet. Check console.</h1>');
+  }
+});
+app.get('/', (req, res) => {
+  res.send('<h1>Welcome to the WhatsApp Buying Bot!</h1><p>Visit <a href="/qr">/qr</a> to scan the QR code.</p>');
+});
+
+app.listen(3000, () => {
+  console.log('🌐 Express server running at http://localhost:3000');
+});
+
+// ---------------------------
+// Initialize WhatsApp Client
+// ---------------------------
 client.initialize();
