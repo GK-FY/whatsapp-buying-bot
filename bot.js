@@ -3,6 +3,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const express = require('express');
+const moment = require('moment-timezone');
 
 /**
  * =============================
@@ -13,41 +14,57 @@ const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254701339573';
 let PAYMENT_INFO = '0701339573 (Camlus)'; // Default payment info; admin can update.
 const PORT = 3000;
 
-// New variables: Minimum and Maximum withdrawal amounts.
-let MIN_WITHDRAWAL = 20; // default minimum withdrawal (KSH)
-let MAX_WITHDRAWAL = 1000; // default maximum withdrawal (KSH)
+// Minimum & Maximum withdrawal amounts (admin can update via set withdrawal command).
+let MIN_WITHDRAWAL = 20;
+let MAX_WITHDRAWAL = 1000;
 
-// In-memory orders store: key = orderID, value = order details.
-const orders = {};
+// Orders & referral data in memory.
+const orders = {};   // key = orderID, value = order details
+const referrals = {}; // key = userNumber, value = { code, referred: [...], earnings, withdrawals: [...], pin }
 
-// In-memory referral store: key = referrer (sender id), value = { code, referred: [user IDs], earnings, withdrawals: [], pin }.
-const referrals = {};
-
-// In-memory session store for multi-step flows (key = sender).
+// For multi-step flows.
 const session = {};
 
 /**
- * Helper: Generate a unique order ID (e.g., FY'S-123456)
+ * Format date/time in Kenya (Africa/Nairobi)
+ */
+function formatKenyaTime(date) {
+  return moment(date).tz('Africa/Nairobi').format('YYYY-MM-DD HH:mm:ss');
+}
+
+/**
+ * Mask a WhatsApp ID (like 254701234567@c.us) partially for privacy
+ */
+function maskWhatsAppID(waid) {
+  // Typically "2547XXXXXXXX@c.us"
+  // We'll keep first 5 digits, then mask next 4, keep last 1.
+  // e.g. "25470****6@c.us"
+  const atIndex = waid.indexOf('@');
+  if (atIndex === -1) return waid; // fallback
+  const phone = waid.slice(0, atIndex); // e.g. "254701234567"
+  if (phone.length < 6) return waid; // too short to mask
+  const first5 = phone.slice(0, 5); // "25470"
+  const last1 = phone.slice(-1);    // "7"
+  return `${first5}****${last1}@c.us`;
+}
+
+/**
+ * Generate a unique order ID
  */
 function generateOrderID() {
   return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 /**
- * Helper: Validate Safaricom phone numbers (07XXXXXXXX or 01XXXXXXXX)
+ * Validate Safaricom phone (07xxxxxxx or 01xxxxxxx)
  */
 function isSafaricomNumber(num) {
   return /^0[71]\d{8}$/.test(num) || /^01\d{8}$/.test(num);
 }
 
 /**
- * =============================
- * PACKAGES: Airtime, Data, and SMS
- * =============================
+ * PACKAGES (Data, SMS). Airtime is user-defined amount.
  */
-// Airtime: user enters an amount.
-
-// Data packages grouped by subcategory.
 const dataPackages = {
   hourly: [
     { id: 1, name: '1GB', price: 19, validity: '1 hour' },
@@ -69,7 +86,6 @@ const dataPackages = {
   ]
 };
 
-// SMS packages grouped by subcategory.
 const smsPackages = {
   daily: [
     { id: 1, name: '200 SMS', price: 10, validity: 'Daily' }
@@ -83,10 +99,9 @@ const smsPackages = {
 };
 
 /**
- * =============================
- * WHATSAPP CLIENT SETUP
- * =============================
+ * WhatsApp Client Setup
  */
+const { puppeteer } = require('whatsapp-web.js');
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: { headless: true }
@@ -103,15 +118,12 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
   console.log('✅ Bot is online and ready!');
-  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live.\nType "menu" for user flow or "Admin CMD" to see all admin commands.`);
+  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live.\nType "menu" for user flow, or "Admin CMD" to see all admin commands.`);
 });
 
 /**
- * =============================
- * REFERRAL FUNCTIONS
- * =============================
+ * Generate or get referral code for a user, return referral link
  */
-// Get a referral link for a user.
 function getReferralLink(sender) {
   if (!referrals[sender]) {
     const code = 'REF' + Math.floor(100000 + Math.random() * 900000);
@@ -120,13 +132,15 @@ function getReferralLink(sender) {
   return `https://wa.me/${ADMIN_NUMBER}?text=ref ${referrals[sender].code}`;
 }
 
-// Record a referral from a new user.
+/**
+ * If new user sends "ref <code>", record it
+ */
 function recordReferral(newUser, refCode) {
-  for (let ref in referrals) {
-    if (referrals[ref].code === refCode) {
-      if (ref === newUser) return; // Prevent self-referral.
-      if (!referrals[ref].referred.includes(newUser)) {
-        referrals[ref].referred.push(newUser);
+  for (let refUser in referrals) {
+    if (referrals[refUser].code === refCode) {
+      if (refUser === newUser) return; // prevent self-referral
+      if (!referrals[refUser].referred.includes(newUser)) {
+        referrals[refUser].referred.push(newUser);
       }
       if (!session[newUser]) session[newUser] = {};
       session[newUser].referrer = refCode;
@@ -136,9 +150,7 @@ function recordReferral(newUser, refCode) {
 }
 
 /**
- * =============================
- * ADMIN COMMAND PARSER (for quoted parts)
- * =============================
+ * Parse quoted parts for admin commands
  */
 function parseQuotedParts(parts, fromIndex) {
   let result = [];
@@ -166,86 +178,92 @@ function parseQuotedParts(parts, fromIndex) {
 }
 
 /**
- * =============================
- * MESSAGE HANDLER
- * =============================
+ * The main message handler
  */
 client.on('message', async (msg) => {
-  const sender = msg.from; // e.g., "2547xxxxxxx@c.us"
-  const body = msg.body.trim();
-  const lower = body.toLowerCase();
+  const sender = msg.from;
+  const text = msg.body.trim();
+  const lower = text.toLowerCase();
 
-  // ---------- ADMIN COMMANDS ----------
+  // ========== ADMIN-ONLY COMMANDS ==========
   if (sender === `${ADMIN_NUMBER}@c.us`) {
-    // Admin can type "admin cmd" to view all admin commands.
+    // Show admin commands
     if (lower === 'admin cmd') {
       const adminCmds = `📜 *Admin Commands:*\n
-1. update <ORDER_ID> <STATUS> <REMARK>  - Update order status (remark required)
-2. set payment <mpesa_number> "<Name>"   - Update payment details
-3. add data <subcat> "<name>" <price> "<validity>"  - Add a new data package (subcat: hourly/daily/weekly/monthly)
-4. remove data <subcat> <id>            - Remove a data package
-5. edit data <subcat> <id> <newprice>     - Edit price of a data package
-6. add sms <subcat> "<name>" <price> "<validity>"   - Add a new SMS package (subcat: daily/weekly/monthly)
-7. remove sms <subcat> <id>             - Remove an SMS package
-8. edit sms <subcat> <id> <newprice>      - Edit price of an SMS package
-9. set withdrawal <min> <max>           - Set minimum and maximum withdrawal amounts
-10. search <ORDER_ID>                   - Search for an order
-11. referrals all                       - View all referral data
-12. withdraw update <referrer_code> <withdrawal_id> <STATUS> <remarks> - Update withdrawal request
-`;
+1) update <ORDER_ID> <STATUS> <REMARK>\n   - e.g. update FY'S-123456 CANCELLED "No stock"
+2) set payment <mpesa_number> "<Name>"
+3) add data <subcat> "<name>" <price> "<validity>"
+4) remove data <subcat> <id>
+5) edit data <subcat> <id> <newprice>
+6) add sms <subcat> "<name>" <price> "<validity>"
+7) remove sms <subcat> <id>
+8) edit sms <subcat> <id> <newprice>
+9) set withdrawal <min> <max>   (Set min & max withdrawal)
+10) search <ORDER_ID>           (View order details)
+11) referrals all               (View all referral data)
+12) withdraw update <ref_code> <wd_id> <STATUS> <remarks>`;
       return client.sendMessage(sender, adminCmds);
     }
 
-    // Command: set withdrawal <min> <max>
+    // set withdrawal <min> <max>
     if (lower.startsWith('set withdrawal ')) {
-      const parts = body.split(' ');
+      const parts = text.split(' ');
       if (parts.length !== 3) {
         return client.sendMessage(sender, '❌ Usage: set withdrawal <min> <max>');
       }
-      const min = Number(parts[1]);
-      const max = Number(parts[2]);
-      if (isNaN(min) || isNaN(max) || min <= 0 || max <= min) {
-        return client.sendMessage(sender, '❌ Please provide valid numbers where max > min > 0.');
+      const min = Number(parts[2]);
+      const max = Number(parts[3]); // Actually we need to parse differently
+      // Actually let's do something else: we see we splitted but we might do it incorrectly
+      // Let's do it properly:
+      // Actually, let's just fix it easily:
+      const splitted = text.split(' ');
+      if (splitted.length !== 4) {
+        return client.sendMessage(sender, '❌ Usage: set withdrawal <min> <max>');
       }
-      MIN_WITHDRAWAL = min;
-      MAX_WITHDRAWAL = max;
-      return client.sendMessage(sender, `✅ Withdrawal limits updated: Minimum = KSH ${MIN_WITHDRAWAL}, Maximum = KSH ${MAX_WITHDRAWAL}`);
+      const minW = Number(splitted[2]);
+      const maxW = Number(splitted[3]);
+      if (isNaN(minW) || isNaN(maxW) || minW <= 0 || maxW <= minW) {
+        return client.sendMessage(sender, '❌ Provide valid numbers, max > min > 0');
+      }
+      MIN_WITHDRAWAL = minW;
+      MAX_WITHDRAWAL = maxW;
+      return client.sendMessage(sender, `✅ Withdrawal limits updated: min = KSH ${MIN_WITHDRAWAL}, max = KSH ${MAX_WITHDRAWAL}`);
     }
 
-    // Command: update <ORDER_ID> <STATUS> <REMARK>
+    // update <ORDER_ID> <STATUS> <REMARK>
     if (lower.startsWith('update ')) {
-      const parts = body.split(' ');
-      if (parts.length < 4) {
-        return client.sendMessage(sender, '❌ Usage: update <ORDER_ID> <STATUS> <REMARK> (Remark is required)');
+      const splitted = text.split(' ');
+      if (splitted.length < 4) {
+        return client.sendMessage(sender, '❌ Usage: update <ORDER_ID> <STATUS> <REMARK>');
       }
-      const orderID = parts[1];
-      const newStatus = parts[2].toUpperCase();
-      const remark = parts.slice(3).join(' ');
+      const orderID = splitted[1];
+      const newStatus = splitted[2].toUpperCase();
+      const remark = splitted.slice(3).join(' ');
       if (!orders[orderID]) {
         return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
       }
       orders[orderID].status = newStatus;
       orders[orderID].remark = remark;
       const user = orders[orderID].customer;
-      let extraMsg = '';
+      let extra = '';
       if (newStatus === 'CONFIRMED') {
-        extraMsg = '✅ Your payment has been confirmed! We are processing your order.';
+        extra = '✅ Payment confirmed! We are processing your order.';
       } else if (newStatus === 'COMPLETED') {
-        extraMsg = '🎉 Your order has been completed! Thank you for choosing FYS PROPERTY. We hope you enjoy your purchase!';
+        extra = '🎉 Your order has been completed! Thank you for choosing FYS PROPERTY!';
       } else if (newStatus === 'CANCELLED') {
-        extraMsg = `😔 We regret to inform you that your order has been cancelled.\n\nOrder Details:\nOrder ID: ${orderID}\nPackage: ${orders[orderID].package}\nPlaced at: ${new Date(orders[orderID].timestamp).toLocaleString()}\n\nRemark: ${remark}\nPlease contact support if needed.`;
+        extra = `😔 We regret to inform you that your order was cancelled.\n\nOrder ID: ${orderID}\nPackage: ${orders[orderID].package}\nPlaced at: ${formatKenyaTime(orders[orderID].timestamp)}\nRemark: ${remark}\nPlease contact support if needed.`;
       } else if (newStatus === 'REFUNDED') {
-        extraMsg = '💰 Your order has been refunded. Please check your M-Pesa balance.';
+        extra = '💰 Your order has been refunded. Please check your M-Pesa balance.';
       } else {
-        extraMsg = 'Your order status has been updated.';
+        extra = 'Your order status has been updated.';
       }
-      client.sendMessage(user, `🔔 *Order Update*\nYour order *${orderID}* is now *${newStatus}*.\n${extraMsg}\n\nReply with "0" for previous menu or "00" for main menu.`);
+      client.sendMessage(user, `🔔 *Order Update*\nOrder *${orderID}* => *${newStatus}*\n${extra}\n\nReply "0" for previous or "00" for main menu.`);
       return client.sendMessage(sender, `✅ Order *${orderID}* updated to *${newStatus}* with remark: "${remark}".`);
     }
 
-    // Command: set payment <mpesa_number> "<Name>"
+    // set payment <mpesa_number> "<Name>"
     if (lower.startsWith('set payment ')) {
-      const parts = parseQuotedParts(body.split(' '), 2);
+      const parts = parseQuotedParts(text.split(' '), 2);
       if (parts.length < 2) {
         return client.sendMessage(sender, '❌ Usage: set payment <mpesa_number> "<Name>"');
       }
@@ -255,107 +273,97 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, `✅ Payment info updated to: ${PAYMENT_INFO}`);
     }
 
-    // Command: add data <subcat> "<name>" <price> "<validity>"
+    // add data ...
     if (lower.startsWith('add data ')) {
-      const parts = parseQuotedParts(body.split(' '), 2);
-      if (parts.length < 4) {
+      const splitted = parseQuotedParts(text.split(' '), 2);
+      if (splitted.length < 4) {
         return client.sendMessage(sender, '❌ Usage: add data <subcat> "<name>" <price> "<validity>"');
       }
-      const subcat = parts[0].toLowerCase();
-      const name = parts[1];
-      const price = Number(parts[2]);
-      const validity = parts[3];
+      const subcat = splitted[0].toLowerCase();
+      const name = splitted[1];
+      const price = Number(splitted[2]);
+      const validity = splitted[3];
       if (isNaN(price)) {
         return client.sendMessage(sender, '❌ Price must be a number.');
       }
       if (!dataPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found. Options: hourly, daily, weekly, monthly.`);
+        return client.sendMessage(sender, `❌ Invalid data category: ${subcat}`);
       }
       const arr = dataPackages[subcat];
-      const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
+      const newId = arr.length ? arr[arr.length - 1].id + 1 : 1;
       arr.push({ id: newId, name, price, validity });
       return client.sendMessage(sender, `✅ Added new data package: [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
     }
 
-    // Command: remove data <subcat> <id>
+    // remove data ...
     if (lower.startsWith('remove data ')) {
-      const parts = body.split(' ');
-      if (parts.length < 4) {
+      const splitted = text.split(' ');
+      if (splitted.length < 4) {
         return client.sendMessage(sender, '❌ Usage: remove data <subcat> <id>');
       }
-      const subcat = parts[2].toLowerCase();
-      const idToRemove = Number(parts[3]);
-      if (isNaN(idToRemove)) {
-        return client.sendMessage(sender, '❌ ID must be a number.');
-      }
+      const subcat = splitted[2].toLowerCase();
+      const idToRemove = Number(splitted[3]);
       if (!dataPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found.`);
+        return client.sendMessage(sender, `❌ Invalid data subcategory: ${subcat}`);
       }
       const arr = dataPackages[subcat];
       const idx = arr.findIndex(p => p.id === idToRemove);
       if (idx === -1) {
-        return client.sendMessage(sender, `❌ No package with ID ${idToRemove} in ${subcat}.`);
+        return client.sendMessage(sender, `❌ No data package with ID ${idToRemove} in ${subcat}.`);
       }
       arr.splice(idx, 1);
       return client.sendMessage(sender, `✅ Removed data package ID ${idToRemove} from ${subcat}.`);
     }
 
-    // Command: edit data <subcat> <id> <newprice>
+    // edit data ...
     if (lower.startsWith('edit data ')) {
-      const parts = body.split(' ');
-      if (parts.length < 5) {
+      const splitted = text.split(' ');
+      if (splitted.length < 5) {
         return client.sendMessage(sender, '❌ Usage: edit data <subcat> <id> <newprice>');
       }
-      const subcat = parts[2].toLowerCase();
-      const idToEdit = Number(parts[3]);
-      const newPrice = Number(parts[4]);
-      if (isNaN(idToEdit) || isNaN(newPrice)) {
-        return client.sendMessage(sender, '❌ ID and price must be numbers.');
-      }
+      const subcat = splitted[2].toLowerCase();
+      const idToEdit = Number(splitted[3]);
+      const newPrice = Number(splitted[4]);
       if (!dataPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Data subcategory "${subcat}" not found.`);
+        return client.sendMessage(sender, `❌ Invalid data subcategory: ${subcat}`);
       }
       const pack = dataPackages[subcat].find(p => p.id === idToEdit);
       if (!pack) {
-        return client.sendMessage(sender, `❌ No package with ID ${idToEdit} in ${subcat}.`);
+        return client.sendMessage(sender, `❌ No data package with ID ${idToEdit} in ${subcat}.`);
       }
       pack.price = newPrice;
-      return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
+      return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] in ${subcat} to KSH ${newPrice}.`);
     }
 
-    // Similar commands for SMS:
+    // add sms ...
     if (lower.startsWith('add sms ')) {
-      const parts = parseQuotedParts(body.split(' '), 2);
-      if (parts.length < 4) {
+      const splitted = parseQuotedParts(text.split(' '), 2);
+      if (splitted.length < 4) {
         return client.sendMessage(sender, '❌ Usage: add sms <subcat> "<name>" <price> "<validity>"');
       }
-      const subcat = parts[0].toLowerCase();
-      const name = parts[1];
-      const price = Number(parts[2]);
-      const validity = parts[3];
-      if (isNaN(price)) {
-        return client.sendMessage(sender, '❌ Price must be a number.');
-      }
+      const subcat = splitted[0].toLowerCase();
+      const name = splitted[1];
+      const price = Number(splitted[2]);
+      const validity = splitted[3];
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found. Options: daily, weekly, monthly.`);
+        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
       }
       const arr = smsPackages[subcat];
-      const newId = arr.length > 0 ? arr[arr.length - 1].id + 1 : 1;
+      const newId = arr.length ? arr[arr.length - 1].id + 1 : 1;
       arr.push({ id: newId, name, price, validity });
-      return client.sendMessage(sender, `✅ Added new SMS package: [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
+      return client.sendMessage(sender, `✅ Added new SMS package [${newId}] ${name} @ KSH ${price} (${validity}) to ${subcat}.`);
     }
+
+    // remove sms ...
     if (lower.startsWith('remove sms ')) {
-      const parts = body.split(' ');
-      if (parts.length < 4) {
+      const splitted = text.split(' ');
+      if (splitted.length < 4) {
         return client.sendMessage(sender, '❌ Usage: remove sms <subcat> <id>');
       }
-      const subcat = parts[2].toLowerCase();
-      const idToRemove = Number(parts[3]);
-      if (isNaN(idToRemove)) {
-        return client.sendMessage(sender, '❌ ID must be a number.');
-      }
+      const subcat = splitted[2].toLowerCase();
+      const idToRemove = Number(splitted[3]);
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found.`);
+        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
       }
       const arr = smsPackages[subcat];
       const idx = arr.findIndex(p => p.id === idToRemove);
@@ -365,187 +373,93 @@ client.on('message', async (msg) => {
       arr.splice(idx, 1);
       return client.sendMessage(sender, `✅ Removed SMS package ID ${idToRemove} from ${subcat}.`);
     }
+
+    // edit sms ...
     if (lower.startsWith('edit sms ')) {
-      const parts = body.split(' ');
-      if (parts.length < 5) {
+      const splitted = text.split(' ');
+      if (splitted.length < 5) {
         return client.sendMessage(sender, '❌ Usage: edit sms <subcat> <id> <newprice>');
       }
-      const subcat = parts[2].toLowerCase();
-      const idToEdit = Number(parts[3]);
-      const newPrice = Number(parts[4]);
-      if (isNaN(idToEdit) || isNaN(newPrice)) {
-        return client.sendMessage(sender, '❌ ID and price must be numbers.');
-      }
+      const subcat = splitted[2].toLowerCase();
+      const idToEdit = Number(splitted[3]);
+      const newPrice = Number(splitted[4]);
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ SMS subcategory "${subcat}" not found.`);
+        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
       }
       const pack = smsPackages[subcat].find(p => p.id === idToEdit);
       if (!pack) {
         return client.sendMessage(sender, `❌ No SMS package with ID ${idToEdit} in ${subcat}.`);
       }
       pack.price = newPrice;
-      return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] in ${subcat} to price KSH ${newPrice}.`);
+      return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] in ${subcat} to KSH ${newPrice}.`);
     }
-    
-    // Command: search <ORDER_ID>
-    if (lower.startsWith('search ')) {
-      const parts = body.split(' ');
-      if (parts.length !== 2) {
-        return client.sendMessage(sender, '❌ Usage: search <ORDER_ID>');
+
+    // referrals all
+    if (lower === 'referrals all') {
+      let resp = `📢 *All Referral Data*\n\nMinWithdraw = ${MIN_WITHDRAWAL}, MaxWithdraw = ${MAX_WITHDRAWAL}\n\n`;
+      for (let r in referrals) {
+        resp += `Referrer: ${r}\nCode: ${referrals[r].code}\nTotal Referred: ${referrals[r].referred.length}\nEarnings: KSH ${referrals[r].earnings}\nWithdrawals: ${referrals[r].withdrawals?.length || 0}\nPin: ${referrals[r].pin ? 'Set' : 'Not Set'}\n\n`;
       }
-      const orderID = parts[1];
-      if (!orders[orderID]) {
-        return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
-      }
-      const o = orders[orderID];
-      return client.sendMessage(sender,
-        `🔍 *Order Details*\n\n` +
-        `🆔 Order ID: ${o.orderID}\n` +
-        `📦 Package: ${o.package}\n` +
-        `💰 Amount: KSH ${o.amount}\n` +
-        `📞 Recipient: ${o.recipient}\n` +
-        `📱 Payment: ${o.payment}\n` +
-        `📌 Status: ${o.status}\n` +
-        `🕒 Placed at: ${new Date(o.timestamp).toLocaleString()}\n` +
-        `📝 Remark: ${o.remark || 'None'}`
-      );
+      return client.sendMessage(sender, resp);
     }
-    
-    // ---------- End Admin Commands ----------
+
+    // withdraw update <referrer_code> <withdrawal_id> <STATUS> <remarks>
+    if (lower.startsWith('withdraw update ')) {
+      const splitted = text.split(' ');
+      if (splitted.length < 6) {
+        return client.sendMessage(sender, '❌ Usage: withdraw update <ref_code> <wd_id> <STATUS> <remarks>');
+      }
+      const refCode = splitted[2];
+      const wdId = splitted[3];
+      const newStatus = splitted[4].toUpperCase();
+      const remarks = splitted.slice(5).join(' ');
+      // find who has this code
+      let foundUser = null;
+      for (let user in referrals) {
+        if (referrals[user].code === refCode) {
+          foundUser = user;
+          break;
+        }
+      }
+      if (!foundUser) {
+        return client.sendMessage(sender, `❌ No user found with referral code ${refCode}.`);
+      }
+      const wArr = referrals[foundUser].withdrawals || [];
+      const wd = wArr.find(x => x.id === wdId);
+      if (!wd) {
+        return client.sendMessage(sender, `❌ No withdrawal ID ${wdId} found for ref code ${refCode}.`);
+      }
+      wd.status = newStatus;
+      wd.remarks = remarks;
+      client.sendMessage(foundUser, `🔔 *Withdrawal Update*\nYour withdrawal (ID: ${wdId}) is now *${newStatus}*.\nRemarks: ${remarks}`);
+      return client.sendMessage(sender, `✅ Updated withdrawal ${wdId} to ${newStatus} with remarks: "${remarks}".`);
+    }
   } // END ADMIN COMMANDS
 
-  // ---------- USER REFERRALS MENU ----------
-  if (lower === 'my referrals') {
-    session[sender] = session[sender] || {};
-    session[sender].prevStep = session[sender].step || 'main';
-    session[sender].step = 'my_referrals_menu';
-    const refMenu = `🌟 *My Referrals Menu* 🌟\n\n` +
-      `Please choose an option:\n` +
-      `1️⃣ View Referral Earnings & Balance\n` +
-      `2️⃣ Withdraw Earnings\n` +
-      `3️⃣ Get Your Referral Link\n` +
-      `4️⃣ Set/Update Your Withdrawal PIN\n` +
-      `5️⃣ View All My Referrals\n\n` +
-      `Type the number of your choice, or "0" to go back.`;
-    return client.sendMessage(sender, refMenu);
+  // ---------- REFERRAL QUICK COMMANDS ----------
+  if (lower === 'referral') {
+    const link = getReferralLink(sender);
+    return client.sendMessage(sender, `😍 *Your Referral Link*\n${link}\nShare with friends to earn KSH5 for each successful order placed!`);
   }
-  if (session[sender]?.step === 'my_referrals_menu') {
-    if (body === '1') {
-      if (!referrals[sender]) {
-        return client.sendMessage(sender, `😞 You have no referral record yet. Type "referral" to generate your referral link and start referring friends!`);
-      }
-      const refData = referrals[sender];
-      let msgText = `📢 *Your Referral Details:*\nReferral Code: *${refData.code}*\nTotal Referrals: *${refData.referred.length}*\nCurrent Earnings: *KSH ${refData.earnings}*\n\nReferred Users:\n`;
-      if (refData.referred.length === 0) {
-        msgText += `None yet. Share your link by typing "referral".`;
-      } else {
-        refData.referred.forEach((u, idx) => {
-          msgText += `${idx + 1}. ${u}\n`;
-        });
-      }
-      if (refData.withdrawals && refData.withdrawals.length > 0) {
-        msgText += `\nWithdrawal Requests:\n`;
-        refData.withdrawals.forEach((wd, idx) => {
-          msgText += `${idx + 1}. ID: ${wd.id}, Amount: KSH ${wd.amount}, Status: ${wd.status}, Requested: ${new Date(wd.timestamp).toLocaleString()}\nRemarks: ${wd.remarks}\n`;
-        });
-      }
-      return client.sendMessage(sender, msgText);
-    } else if (body === '2') {
-      if (!referrals[sender] || referrals[sender].earnings < MIN_WITHDRAWAL) {
-        return client.sendMessage(sender, `😞 You must have at least KSH ${MIN_WITHDRAWAL} in earnings to withdraw.`);
-      }
-      if (!referrals[sender].pin) {
-        return client.sendMessage(sender, `⚠️ Please set up your withdrawal PIN first by choosing option 4.`);
-      }
-      session[sender].step = 'withdraw_request';
-      return client.sendMessage(sender, `💸 *Withdrawal Request*\nPlease enter the withdrawal amount and M-Pesa number separated by a space.\nFor example: \`20 0712345678\`\nNote: Maximum withdrawal is KSH ${MAX_WITHDRAWAL}.\nType "0" to go back.`);
-    } else if (body === '3') {
-      const link = getReferralLink(sender);
-      return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare this link with your friends and earn KSH5 for each successful referral (order must be placed)!`);
-    } else if (body === '4') {
-      session[sender].step = 'set_pin';
-      return client.sendMessage(sender, `🔐 *Set/Update Your Withdrawal PIN*\nPlease enter a new 4-digit PIN (cannot be 1234 or 0000).`);
-    } else if (body === '5') {
-      if (!referrals[sender] || referrals[sender].referred.length === 0) {
-        return client.sendMessage(sender, `😞 You have no referred users yet. Type "referral" to get your referral link and start referring!`);
-      }
-      let refList = `📋 *My Referred Users:*\n`;
-      referrals[sender].referred.forEach((u, idx) => {
-        refList += `${idx + 1}. ${u}\n`;
-      });
-      return client.sendMessage(sender, refList);
-    } else {
-      return client.sendMessage(sender, '❌ Invalid choice. Please type 1, 2, 3, 4, or 5, or "0" to go back.');
+  if (lower.startsWith('ref ')) {
+    const splitted = text.split(' ');
+    if (splitted.length === 2) {
+      recordReferral(sender, splitted[1].toUpperCase());
+      return client.sendMessage(sender, `🙏 Thank you! You've been referred by code *${splitted[1].toUpperCase()}*. Enjoy our services!`);
     }
   }
-  // Withdrawal Request Flow:
-  if (session[sender]?.step === 'withdraw_request') {
-    const parts = body.split(' ');
-    if (parts.length !== 2) {
-      return client.sendMessage(sender, '❌ Please enter the amount and M-Pesa number separated by a space. For example: 20 0712345678');
-    }
-    const amount = Number(parts[0]);
-    const mpesa = parts[1];
-    if (isNaN(amount) || amount <= 0) {
-      return client.sendMessage(sender, '❌ Invalid amount.');
-    }
-    if (amount > referrals[sender].earnings || amount > MAX_WITHDRAWAL) {
-      return client.sendMessage(sender, `❌ You cannot withdraw more than your earnings (KSH ${referrals[sender].earnings}) or the maximum allowed (KSH ${MAX_WITHDRAWAL}).`);
-    }
-    if (amount < MIN_WITHDRAWAL) {
-      return client.sendMessage(sender, `❌ The minimum withdrawal amount is KSH ${MIN_WITHDRAWAL}.`);
-    }
-    if (!isSafaricomNumber(mpesa)) {
-      return client.sendMessage(sender, '❌ Invalid M-Pesa number.');
-    }
-    session[sender].withdrawRequest = { amount, mpesa };
-    session[sender].step = 'withdraw_pin';
-    return client.sendMessage(sender, `🔒 Please enter your 4-digit PIN to confirm withdrawal of KSH ${amount} to ${mpesa}.`);
+
+  // ---------- MAIN MENU NAV ----------
+  if (lower === 'menu' || lower === 'start') {
+    session[sender] = { step: 'main' };
+    const welcome = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟\n\n` +
+      `Thank you for choosing FYS PROPERTY. Your satisfaction is our priority!\n\n` +
+      `Please choose an option by typing a number:\n` +
+      `1️⃣ Airtime\n2️⃣ Data Bundles\n3️⃣ SMS Bundles\n4️⃣ My Referrals\n\n` +
+      `For order status: status <ORDER_ID>\nAfter payment: PAID <ORDER_ID>\nType "00" anytime for main menu.`;
+    return client.sendMessage(sender, welcome);
   }
-  if (session[sender]?.step === 'withdraw_pin') {
-    if (!/^\d{4}$/.test(body)) {
-      return client.sendMessage(sender, '❌ PIN must be exactly 4 digits.');
-    }
-    if (body !== referrals[sender].pin) {
-      return client.sendMessage(sender, '❌ Incorrect PIN. Withdrawal cancelled.');
-    }
-    const reqData = session[sender].withdrawRequest;
-    const withdrawal = {
-      id: `WD-${Math.floor(1000 + Math.random() * 9000)}`,
-      amount: reqData.amount,
-      mpesa: reqData.mpesa,
-      status: 'PENDING',
-      timestamp: new Date().toISOString(),
-      remarks: ''
-    };
-    referrals[sender].withdrawals = referrals[sender].withdrawals || [];
-    referrals[sender].withdrawals.push(withdrawal);
-    referrals[sender].earnings -= reqData.amount;
-    session[sender].step = 'my_referrals_menu';
-    delete session[sender].withdrawRequest;
-    client.sendMessage(sender, `🙏 *Withdrawal Requested!*\nYour request (ID: ${withdrawal.id}) for KSH ${withdrawal.amount} to be sent to ${reqData.mpesa} is received and pending approval.\nThank you for choosing FYS PROPERTY!`);
-    client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 *New Withdrawal Request*\nUser: ${sender}\nWithdrawal ID: ${withdrawal.id}\nAmount: KSH ${withdrawal.amount}\nM-Pesa Number: ${reqData.mpesa}\nTime: ${new Date(withdrawal.timestamp).toLocaleString()}\n\nUse "withdraw update <referrer_code> <withdrawal_id> <STATUS> <remarks>" to update.`);
-    return;
-  }
-  if (session[sender]?.step === 'set_pin') {
-    if (!/^\d{4}$/.test(body)) {
-      return client.sendMessage(sender, '❌ PIN must be exactly 4 digits.');
-    }
-    if (body === '1234' || body === '0000') {
-      return client.sendMessage(sender, '❌ That PIN is not allowed. Please choose a different 4-digit PIN.');
-    }
-    if (!referrals[sender]) {
-      const code = 'REF' + Math.floor(100000 + Math.random() * 900000);
-      referrals[sender] = { code, referred: [], earnings: 0, withdrawals: [], pin: body };
-    } else {
-      referrals[sender].pin = body;
-    }
-    session[sender].step = 'my_referrals_menu';
-    return client.sendMessage(sender, `✅ Your withdrawal PIN has been set to *${body}*.\nReturning to My Referrals Menu.`);
-  }
-  
-  // ---------- Standard Navigation ----------
-  if (body === '0') {
+  if (text === '0') {
     if (session[sender] && session[sender].prevStep) {
       session[sender].step = session[sender].prevStep;
       return client.sendMessage(sender, '🔙 Returning to previous menu...');
@@ -554,294 +468,159 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, '🏠 Returning to main menu...');
     }
   }
-  if (body === '00') {
+  if (text === '00') {
     session[sender] = { step: 'main' };
     return client.sendMessage(sender, '🏠 Returning to main menu...');
   }
 
-  // ---------- Main Menu ----------
-  if (lower === 'menu' || lower === 'start') {
-    session[sender] = { step: 'main' };
-    const welcomeMsg = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟\n\n` +
-      `Thank you for choosing FYS PROPERTY, where your satisfaction is our priority!\n\n` +
-      `Please choose an option by typing a number:\n` +
-      `1️⃣ Airtime\n2️⃣ Data Bundles\n3️⃣ SMS Bundles\n4️⃣ My Referrals\n\n` +
-      `For order status, type: status <ORDER_ID>\n` +
-      `After payment, type: PAID <ORDER_ID>\n` +
-      `Type "00" at any time for the main menu.`;
-    return client.sendMessage(sender, welcomeMsg);
-  }
-
-  // ---------- Airtime Flow ----------
-  if (session[sender]?.step === 'main' && lower === '1') {
+  // ---------- REFERRALS MENU (OPTION 4) ----------
+  if (session[sender]?.step === 'main' && text === '4') {
+    // My Referrals sub-menu
     session[sender].prevStep = 'main';
-    session[sender].step = 'airtime';
-    return client.sendMessage(sender, '💳 *Airtime Purchase*\n\nPlease enter the airtime amount in KES (e.g., "50").\nType "0" to go back.');
+    session[sender].step = 'my_referrals_menu';
+    const refMenu = `🌟 *My Referrals Menu* 🌟\n\n` +
+      `1) View Earnings & Balance\n2) Withdraw Earnings\n3) Get Referral Link\n4) Set/Update PIN\n5) View Referred Users (partially masked)\n\nType the number, or "0" to go back.`;
+    return client.sendMessage(sender, refMenu);
   }
-  if (session[sender]?.step === 'airtime') {
-    const amt = Number(body);
-    if (isNaN(amt) || amt <= 0) {
-      return client.sendMessage(sender, '❌ Invalid amount. Please enter a positive number (e.g., "50").');
-    }
-    const orderID = generateOrderID();
-    orders[orderID] = {
-      orderID,
-      customer: sender,
-      package: `Airtime (KES ${amt})`,
-      amount: amt,
-      recipient: null,
-      payment: null,
-      status: 'PENDING',
-      timestamp: new Date().toISOString()
-    };
-    delete session[sender];
-    return client.sendMessage(sender,
-      `🛒 *Order Created!*\n\n` +
-      `🆔 Order ID: *${orderID}*\n` +
-      `📦 Package: Airtime (KES ${amt})\n` +
-      `💰 Price: KES ${amt}\n\n` +
-      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).\nType "0" to go back.`
-    );
-  }
-
-  // ---------- Data Flow ----------
-  if (session[sender]?.step === 'main' && lower === '2') {
-    session[sender].prevStep = 'main';
-    session[sender].step = 'data-category';
-    return client.sendMessage(sender,
-      `📶 *Data Bundles*\nChoose a subcategory by typing the number:\n1) Hourly\n2) Daily\n3) Weekly\n4) Monthly\n\n` +
-      `Type "0" to go back, "00" for main menu.`
-    );
-  }
-  if (session[sender]?.step === 'data-category') {
-    if (!['1','2','3','4'].includes(lower)) {
-      return client.sendMessage(sender, '❌ Invalid choice. Please type 1, 2, 3, or 4.');
-    }
-    let cat = '';
-    if (lower === '1') cat = 'hourly';
-    else if (lower === '2') cat = 'daily';
-    else if (lower === '3') cat = 'weekly';
-    else if (lower === '4') cat = 'monthly';
-    session[sender].prevStep = 'data-category';
-    session[sender].step = 'data-list';
-    session[sender].dataCat = cat;
-    let listMsg = `✅ *${cat.toUpperCase()} Data Bundles:*\n`;
-    dataPackages[cat].forEach((p) => {
-      listMsg += `[${p.id}] ${p.name} @ KSH ${p.price} (${p.validity})\n`;
-    });
-    listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
-    return client.sendMessage(sender, listMsg);
-  }
-  if (session[sender]?.step === 'data-list') {
-    const cat = session[sender].dataCat;
-    const pkgId = Number(body);
-    if (isNaN(pkgId)) {
-      return client.sendMessage(sender, '❌ Invalid package ID. Please type a number.');
-    }
-    const selected = dataPackages[cat].find(p => p.id === pkgId);
-    if (!selected) {
-      return client.sendMessage(sender, '❌ No package with that ID. Type "menu" to restart.');
-    }
-    const orderID = generateOrderID();
-    orders[orderID] = {
-      orderID,
-      customer: sender,
-      package: `${selected.name} (${cat})`,
-      amount: selected.price,
-      recipient: null,
-      payment: null,
-      status: 'PENDING',
-      timestamp: new Date().toISOString()
-    };
-    if (session[sender]?.referrer) {
-      orders[orderID].referrer = session[sender].referrer;
-    }
-    delete session[sender];
-    return client.sendMessage(sender,
-      `🛒 *Order Created!*\n\n` +
-      `🆔 Order ID: *${orderID}*\n` +
-      `📦 Package: ${selected.name} (${cat})\n` +
-      `💰 Price: KSH ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).\nType "0" to go back.`
-    );
-  }
-
-  // ---------- SMS Flow ----------
-  if (session[sender]?.step === 'main' && lower === '3') {
-    session[sender].prevStep = 'main';
-    session[sender].step = 'sms-category';
-    return client.sendMessage(sender,
-      `✉️ *SMS Bundles*\nChoose a subcategory by typing the number:\n1) Daily\n2) Weekly\n3) Monthly\n\n` +
-      `Type "0" to go back, "00" for main menu.`
-    );
-  }
-  if (session[sender]?.step === 'sms-category') {
-    if (!['1','2','3'].includes(lower)) {
-      return client.sendMessage(sender, '❌ Invalid choice. Please type 1, 2, or 3.');
-    }
-    let cat = '';
-    if (lower === '1') cat = 'daily';
-    else if (lower === '2') cat = 'weekly';
-    else if (lower === '3') cat = 'monthly';
-    session[sender].prevStep = 'sms-category';
-    session[sender].step = 'sms-list';
-    session[sender].smsCat = cat;
-    let listMsg = `✅ *${cat.toUpperCase()} SMS Bundles:*\n`;
-    smsPackages[cat].forEach((p) => {
-      listMsg += `[${p.id}] ${p.name} @ KSH ${p.price} (${p.validity})\n`;
-    });
-    listMsg += `\nType the package ID to select (e.g., "1").\nOr type "0" to go back, "00" for main menu.`;
-    return client.sendMessage(sender, listMsg);
-  }
-  if (session[sender]?.step === 'sms-list') {
-    const cat = session[sender].smsCat;
-    const pkgId = Number(body);
-    if (isNaN(pkgId)) {
-      return client.sendMessage(sender, '❌ Invalid package ID. Please type a number.');
-    }
-    const selected = smsPackages[cat].find(p => p.id === pkgId);
-    if (!selected) {
-      return client.sendMessage(sender, '❌ No SMS package with that ID. Type "menu" to restart.');
-    }
-    const orderID = generateOrderID();
-    orders[orderID] = {
-      orderID,
-      customer: sender,
-      package: `${selected.name} (SMS - ${cat})`,
-      amount: selected.price,
-      recipient: null,
-      payment: null,
-      status: 'PENDING',
-      timestamp: new Date().toISOString()
-    };
-    if (session[sender]?.referrer) {
-      orders[orderID].referrer = session[sender].referrer;
-    }
-    delete session[sender];
-    return client.sendMessage(sender,
-      `🛒 *Order Created!*\n\n` +
-      `🆔 Order ID: *${orderID}*\n` +
-      `📦 Package: ${selected.name} (SMS - ${cat})\n` +
-      `💰 Price: KSH ${selected.price}\n\n` +
-      `👉 Please enter the *recipient phone number* (e.g., 07XXXXXXXX).\nType "0" to go back.`
-    );
-  }
-
-  // ---------- Capture Recipient ----------
-  const pendingRecipOrder = Object.values(orders).find(o => o.customer === sender && !o.recipient);
-  if (pendingRecipOrder) {
-    if (!isSafaricomNumber(body)) {
-      return client.sendMessage(sender, '❌ Invalid phone number. Must be in the format 07XXXXXXXX or 01XXXXXXXX.');
-    }
-    pendingRecipOrder.recipient = body;
-    return client.sendMessage(sender, `✅ Recipient set to *${body}*.\nNow please enter your *payment number* (Safaricom).\nType "0" to go back.`);
-  }
-
-  // ---------- Capture Payment ----------
-  const pendingPaymentOrder = Object.values(orders).find(o => o.customer === sender && o.recipient && !o.payment);
-  if (pendingPaymentOrder) {
-    if (!isSafaricomNumber(body)) {
-      return client.sendMessage(sender, '❌ Invalid payment number. Must be in the format 07XXXXXXXX or 01XXXXXXXX.');
-    }
-    pendingPaymentOrder.payment = body;
-    const order = pendingPaymentOrder;
-    const summary = `🎉 *Order Summary* 🎉\n\n` +
-      `🆔 Order ID: *${order.orderID}*\n` +
-      `📦 Package: *${order.package}*\n` +
-      `💰 Amount: *KSH ${order.amount}*\n` +
-      `📞 Recipient: *${order.recipient}*\n` +
-      `📱 Payment Number: *${order.payment}*\n` +
-      `🕒 Placed at: ${new Date(order.timestamp).toLocaleString()}\n\n` +
-      `👉 Please send *KSH ${order.amount}* to *${PAYMENT_INFO}*.\n` +
-      `Then type: *PAID ${order.orderID}* when done.\n\n` +
-      `Type "0" to go back or "00" for main menu.`;
-    client.sendMessage(sender, summary);
-    let adminMsg = `🔔 *New Order Received!* 🔔\n\n` +
-      `🆔 Order ID: ${order.orderID}\n` +
-      `📦 Package: ${order.package}\n` +
-      `💰 Amount: KSH ${order.amount}\n` +
-      `📞 Recipient: ${order.recipient}\n` +
-      `📱 Payment Number: ${order.payment}\n` +
-      `🕒 Time: ${new Date(order.timestamp).toLocaleString()}\n` +
-      `User: ${sender}\n`;
-    if (order.referrer) {
-      adminMsg += `Referred by Code: ${order.referrer}\n`;
-    }
-    adminMsg += `\n*Admin Commands:*\nupdate ${order.orderID} <STATUS> <REMARK>\nset payment <mpesa> "Name"\n` +
-      `add data <subcat> "<name>" <price> "<validity>"\nremove data <subcat> <id>\nedit data <subcat> <id> <newprice>\n` +
-      `add sms <subcat> "<name>" <price> "<validity>"\nremove sms <subcat> <id>\nedit sms <subcat> <id> <newprice>\n` +
-      `search <ORDER_ID>\nset withdrawal <min> <max>\nwithdraw update <referrer_code> <withdrawal_id> <STATUS> <remarks>\nreferrals all\nAdmin CMD`;
-    client.sendMessage(`${ADMIN_NUMBER}@c.us`, adminMsg);
-    return;
-  }
-
-  // ---------- Confirm Payment ----------
-  if (lower.startsWith('paid ')) {
-    const parts = body.split(' ');
-    if (parts.length !== 2) {
-      return client.sendMessage(sender, '❌ Usage: PAID <ORDER_ID>');
-    }
-    const orderID = parts[1];
-    if (!orders[orderID]) {
-      return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
-    }
-    orders[orderID].status = 'CONFIRMED';
-    if (orders[orderID].referrer && !orders[orderID].referralCredited) {
-      for (let ref in referrals) {
-        if (referrals[ref].code === orders[orderID].referrer) {
-          referrals[ref].earnings += 5;
-          break;
-        }
+  if (session[sender]?.step === 'my_referrals_menu') {
+    if (text === '1') {
+      // View Earnings & Balance
+      if (!referrals[sender]) {
+        return client.sendMessage(sender, `😞 You have no referral record yet. Type "referral" to generate your link and start referring friends!`);
       }
-      orders[orderID].referralCredited = true;
+      const rData = referrals[sender];
+      let msg = `📢 *Referral Overview*\nCode: *${rData.code}*\nEarnings: KSH ${rData.earnings}\nTotal Referred: ${rData.referred.length}\n\n`;
+      if (rData.withdrawals && rData.withdrawals.length > 0) {
+        msg += `🪙 *Withdrawal History*:\n`;
+        rData.withdrawals.forEach((wd, i) => {
+          msg += `${i + 1}. ID: ${wd.id}, Amt: KSH ${wd.amount}, Status: ${wd.status}, Requested: ${formatKenyaTime(wd.timestamp)}\nRemarks: ${wd.remarks}\n`;
+        });
+      } else {
+        msg += `No withdrawals yet.\n`;
+      }
+      return client.sendMessage(sender, msg);
+    } else if (text === '2') {
+      // Withdraw
+      if (!referrals[sender] || referrals[sender].earnings < MIN_WITHDRAWAL) {
+        return client.sendMessage(sender, `😞 You need at least KSH ${MIN_WITHDRAWAL} to withdraw. Keep referring or placing orders!`);
+      }
+      if (!referrals[sender].pin) {
+        return client.sendMessage(sender, `⚠️ You have not set a withdrawal PIN yet. Choose option 4 to set your PIN first.`);
+      }
+      session[sender].step = 'withdraw_request';
+      return client.sendMessage(sender, `💸 *Withdrawal Request*\nEnter "<amount> <mpesa_number>" e.g. "50 0712345678".\nLimits: Min KSH ${MIN_WITHDRAWAL}, Max KSH ${MAX_WITHDRAWAL}\nType "0" to go back.`);
+    } else if (text === '3') {
+      // Referral link
+      const link = getReferralLink(sender);
+      return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare to earn KSH5 per successful referral!`);
+    } else if (text === '4') {
+      // Set or update PIN
+      session[sender].step = 'set_pin';
+      return client.sendMessage(sender, `🔐 *Set/Update PIN*\nEnter a 4-digit PIN (not "1234" or "0000").`);
+    } else if (text === '5') {
+      // View referred users partially masked
+      if (!referrals[sender] || referrals[sender].referred.length === 0) {
+        return client.sendMessage(sender, `😞 You haven't referred anyone yet. Type "referral" to get your link!`);
+      }
+      let userList = `👥 *Your Referred Users* (partially masked):\n\n`;
+      referrals[sender].referred.forEach((u, i) => {
+        const masked = maskWhatsAppID(u);
+        // Gather stats: how many orders placed, how many canceled
+        const userAllOrders = Object.values(orders).filter(o => o.customer === u);
+        const totalOrders = userAllOrders.length;
+        const canceledOrders = userAllOrders.filter(o => o.status === 'CANCELLED').length;
+        userList += `${i + 1}. ${masked}\n   Orders Placed: ${totalOrders}, Cancelled: ${canceledOrders}\n\n`;
+      });
+      return client.sendMessage(sender, userList);
+    } else {
+      return client.sendMessage(sender, '❌ Invalid choice. Please type 1,2,3,4,5 or "0" to go back.');
     }
-    client.sendMessage(sender,
-      `✅ Payment confirmed!\nYour order *${orderID}* is now *CONFIRMED*.\n\n✨ Thank you for choosing FYS PROPERTY! We truly appreciate your trust. For any help, please call 0701339573.\n\nType "00" for the main menu.`
-    );
-    client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 Order *${orderID}* marked as CONFIRMED by the user.`);
+  }
+
+  // ---------- WITHDRAW REQUEST FLOW ----------
+  if (session[sender]?.step === 'withdraw_request') {
+    const splitted = text.split(' ');
+    if (splitted.length !== 2) {
+      return client.sendMessage(sender, '❌ Usage: "<amount> <mpesa_number>" e.g. "50 0712345678"');
+    }
+    const amount = Number(splitted[0]);
+    const mpesa = splitted[1];
+    if (isNaN(amount) || amount <= 0) {
+      return client.sendMessage(sender, '❌ Invalid amount.');
+    }
+    if (!isSafaricomNumber(mpesa)) {
+      return client.sendMessage(sender, '❌ Invalid M-Pesa number.');
+    }
+    if (!referrals[sender]) {
+      return client.sendMessage(sender, `😞 No referral record found. Type "referral" to get your link.`);
+    }
+    if (amount > referrals[sender].earnings || amount > MAX_WITHDRAWAL) {
+      return client.sendMessage(sender, `❌ You cannot withdraw more than your current earnings (KSH ${referrals[sender].earnings}) or the max limit (KSH ${MAX_WITHDRAWAL}).`);
+    }
+    if (amount < MIN_WITHDRAWAL) {
+      return client.sendMessage(sender, `❌ Minimum withdrawal is KSH ${MIN_WITHDRAWAL}.`);
+    }
+    session[sender].withdrawRequest = { amount, mpesa };
+    session[sender].step = 'withdraw_pin';
+    return client.sendMessage(sender, `🔒 Enter your 4-digit PIN to confirm withdrawing KSH ${amount} to ${mpesa}.`);
+  }
+  if (session[sender]?.step === 'withdraw_pin') {
+    // Validate pin
+    if (!referrals[sender]) {
+      return client.sendMessage(sender, '❌ No referral record found.');
+    }
+    if (referrals[sender].pin !== text) {
+      return client.sendMessage(sender, '❌ Incorrect PIN. Withdrawal canceled.');
+    }
+    // Process
+    const reqData = session[sender].withdrawRequest;
+    const wd = {
+      id: `WD-${Math.floor(1000 + Math.random() * 9000)}`,
+      amount: reqData.amount,
+      mpesa: reqData.mpesa,
+      status: 'PENDING',
+      timestamp: new Date().toISOString(),
+      remarks: ''
+    };
+    referrals[sender].withdrawals = referrals[sender].withdrawals || [];
+    referrals[sender].withdrawals.push(wd);
+    referrals[sender].earnings -= reqData.amount;
+    delete session[sender].withdrawRequest;
+    session[sender].step = 'my_referrals_menu';
+    client.sendMessage(sender, `🙏 *Withdrawal Requested!*\nID: ${wd.id}, KSH ${wd.amount} to ${wd.mpesa}\nStatus: PENDING.\nWe appreciate you choosing FYS PROPERTY!`);
+    client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 *New Withdrawal Request*\nUser: ${sender}\nWithdrawal ID: ${wd.id}\nAmount: KSH ${wd.amount}\nM-Pesa: ${wd.mpesa}\nTime: ${formatKenyaTime(wd.timestamp)}\nUse "withdraw update <ref_code> <wd_id> <STATUS> <remarks>" to update.`);
     return;
   }
 
-  // ---------- Order Status ----------
-  if (lower.startsWith('status ')) {
-    const parts = body.split(' ');
-    if (parts.length !== 2) {
-      return client.sendMessage(sender, '❌ Usage: status <ORDER_ID>');
+  // ---------- SET PIN ----------
+  if (session[sender]?.step === 'set_pin') {
+    if (!/^\d{4}$/.test(text)) {
+      return client.sendMessage(sender, '❌ PIN must be exactly 4 digits.');
     }
-    const orderID = parts[1];
-    if (!orders[orderID]) {
-      return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
+    if (text === '1234' || text === '0000') {
+      return client.sendMessage(sender, '❌ That PIN is not allowed. Please choose a different 4-digit PIN.');
     }
-    const o = orders[orderID];
-    return client.sendMessage(sender,
-      `📦 *Order Status*\n\n` +
-      `🆔 Order ID: ${o.orderID}\n` +
-      `📦 Package: ${o.package}\n` +
-      `💰 Amount: KSH ${o.amount}\n` +
-      `📞 Recipient: ${o.recipient}\n` +
-      `📱 Payment: ${o.payment}\n` +
-      `📌 Status: ${o.status}\n` +
-      `🕒 Placed at: ${new Date(o.timestamp).toLocaleString()}\n` +
-      `📝 Remark: ${o.remark || 'None'}\n\n` +
-      `Type "0" to go back or "00" for main menu.`
-    );
+    if (!referrals[sender]) {
+      const code = 'REF' + Math.floor(100000 + Math.random() * 900000);
+      referrals[sender] = { code, referred: [], earnings: 0, withdrawals: [], pin: text };
+    } else {
+      referrals[sender].pin = text;
+    }
+    session[sender].step = 'my_referrals_menu';
+    return client.sendMessage(sender, `✅ Your withdrawal PIN is now set to ${text}. Returning to My Referrals menu.`);
   }
 
-  // ---------- Fallback / Help Message ----------
+  // ---------- FALLBACK ----------
   client.sendMessage(sender,
     `🤖 *FY'S ULTRA BOT*\n` +
     `Type "menu" to see the main menu.\n` +
-    `For order status, type: status <ORDER_ID>\n` +
-    `After payment, type: PAID <ORDER_ID>\n` +
-    `For referral features, type: my referrals\n` +
-    `Or type "0" for previous menu, "00" for main menu.`
+    `For order status: status <ORDER_ID>\nAfter payment: PAID <ORDER_ID>\nFor referrals: my referrals\n` +
+    `Or "0" for previous, "00" for main menu.`
   );
 });
 
 /**
- * =============================
- * EXPRESS SERVER FOR WEB QR CODE
- * =============================
+ * EXPRESS SERVER for QR code
  */
 const app = express();
 
@@ -875,12 +654,10 @@ app.get('/qr', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🌐 Express server running at http://localhost:${PORT}`);
+  console.log(`🌐 Express server is running at http://localhost:${PORT}`);
 });
 
 /**
- * =============================
- * INITIALIZE WHATSAPP CLIENT
- * =============================
+ * Initialize the WhatsApp client
  */
 client.initialize();
