@@ -3,7 +3,6 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const express = require('express');
-const moment = require('moment-timezone');
 
 /**
  * =============================
@@ -26,10 +25,25 @@ const referrals = {}; // key = userNumber, value = { code, referred: [...], earn
 const session = {};
 
 /**
- * Format date/time in Kenya (Africa/Nairobi)
+ * Manually format date/time in Kenya (UTC+3) without moment-timezone
  */
 function formatKenyaTime(date) {
-  return moment(date).tz('Africa/Nairobi').format('YYYY-MM-DD HH:mm:ss');
+  // 1) Convert date to MS
+  // 2) Subtract the local offset
+  // 3) Add +3 hours offset
+  const utcMs = date.getTime() + (date.getTimezoneOffset() * 60000);
+  const kenyaMs = utcMs + (3 * 3600000);
+  const kenyaDate = new Date(kenyaMs);
+
+  // Format as "YYYY-MM-DD HH:mm:ss"
+  const year = kenyaDate.getFullYear();
+  const month = String(kenyaDate.getMonth() + 1).padStart(2, '0');
+  const day = String(kenyaDate.getDate()).padStart(2, '0');
+  const hours = String(kenyaDate.getHours()).padStart(2, '0');
+  const mins = String(kenyaDate.getMinutes()).padStart(2, '0');
+  const secs = String(kenyaDate.getSeconds()).padStart(2, '0');
+
+  return `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
 }
 
 /**
@@ -49,7 +63,7 @@ function maskWhatsAppID(waid) {
 }
 
 /**
- * Generate a unique order ID
+ * Generate a unique order ID (FY'S-XXXXXX)
  */
 function generateOrderID() {
   return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
@@ -63,7 +77,7 @@ function isSafaricomNumber(num) {
 }
 
 /**
- * PACKAGES (Data, SMS). Airtime is user-defined amount.
+ * PACKAGES (Data, SMS). Airtime is user-defined.
  */
 const dataPackages = {
   hourly: [
@@ -118,7 +132,7 @@ client.on('qr', (qr) => {
 
 client.on('ready', async () => {
   console.log('✅ Bot is online and ready!');
-  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live.\nType "menu" for user flow, or "Admin CMD" to see all admin commands.`);
+  client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🎉 Hello Admin! FY'S ULTRA BOT is now live.\nType "menu" for user flow or "Admin CMD" for admin commands.`);
 });
 
 /**
@@ -187,10 +201,10 @@ client.on('message', async (msg) => {
 
   // ========== ADMIN-ONLY COMMANDS ==========
   if (sender === `${ADMIN_NUMBER}@c.us`) {
-    // Show admin commands
+    // Admin CMD list
     if (lower === 'admin cmd') {
       const adminCmds = `📜 *Admin Commands:*\n
-1) update <ORDER_ID> <STATUS> <REMARK>\n   - e.g. update FY'S-123456 CANCELLED "No stock"
+1) update <ORDER_ID> <STATUS> <REMARK>
 2) set payment <mpesa_number> "<Name>"
 3) add data <subcat> "<name>" <price> "<validity>"
 4) remove data <subcat> <id>
@@ -198,24 +212,15 @@ client.on('message', async (msg) => {
 6) add sms <subcat> "<name>" <price> "<validity>"
 7) remove sms <subcat> <id>
 8) edit sms <subcat> <id> <newprice>
-9) set withdrawal <min> <max>   (Set min & max withdrawal)
-10) search <ORDER_ID>           (View order details)
-11) referrals all               (View all referral data)
+9) set withdrawal <min> <max>
+10) search <ORDER_ID>
+11) referrals all
 12) withdraw update <ref_code> <wd_id> <STATUS> <remarks>`;
       return client.sendMessage(sender, adminCmds);
     }
 
     // set withdrawal <min> <max>
     if (lower.startsWith('set withdrawal ')) {
-      const parts = text.split(' ');
-      if (parts.length !== 3) {
-        return client.sendMessage(sender, '❌ Usage: set withdrawal <min> <max>');
-      }
-      const min = Number(parts[2]);
-      const max = Number(parts[3]); // Actually we need to parse differently
-      // Actually let's do something else: we see we splitted but we might do it incorrectly
-      // Let's do it properly:
-      // Actually, let's just fix it easily:
       const splitted = text.split(' ');
       if (splitted.length !== 4) {
         return client.sendMessage(sender, '❌ Usage: set withdrawal <min> <max>');
@@ -251,17 +256,17 @@ client.on('message', async (msg) => {
       } else if (newStatus === 'COMPLETED') {
         extra = '🎉 Your order has been completed! Thank you for choosing FYS PROPERTY!';
       } else if (newStatus === 'CANCELLED') {
-        extra = `😔 We regret to inform you that your order was cancelled.\n\nOrder ID: ${orderID}\nPackage: ${orders[orderID].package}\nPlaced at: ${formatKenyaTime(orders[orderID].timestamp)}\nRemark: ${remark}\nPlease contact support if needed.`;
+        extra = `😔 We regret to inform you that your order was cancelled.\n\nOrder ID: ${orderID}\nPackage: ${orders[orderID].package}\nPlaced at: ${formatKenyaTime(new Date(orders[orderID].timestamp))}\nRemark: ${remark}\nPlease contact support if needed.`;
       } else if (newStatus === 'REFUNDED') {
         extra = '💰 Your order has been refunded. Please check your M-Pesa balance.';
       } else {
         extra = 'Your order status has been updated.';
       }
-      client.sendMessage(user, `🔔 *Order Update*\nOrder *${orderID}* => *${newStatus}*\n${extra}\n\nReply "0" for previous or "00" for main menu.`);
+      client.sendMessage(user, `🔔 *Order Update*\nOrder *${orderID}* => *${newStatus}*\n${extra}\n\nReply "0" or "00" for menus.`);
       return client.sendMessage(sender, `✅ Order *${orderID}* updated to *${newStatus}* with remark: "${remark}".`);
     }
 
-    // set payment <mpesa_number> "<Name>"
+    // set payment ...
     if (lower.startsWith('set payment ')) {
       const parts = parseQuotedParts(text.split(' '), 2);
       if (parts.length < 2) {
@@ -283,9 +288,6 @@ client.on('message', async (msg) => {
       const name = splitted[1];
       const price = Number(splitted[2]);
       const validity = splitted[3];
-      if (isNaN(price)) {
-        return client.sendMessage(sender, '❌ Price must be a number.');
-      }
       if (!dataPackages[subcat]) {
         return client.sendMessage(sender, `❌ Invalid data category: ${subcat}`);
       }
@@ -304,7 +306,7 @@ client.on('message', async (msg) => {
       const subcat = splitted[2].toLowerCase();
       const idToRemove = Number(splitted[3]);
       if (!dataPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Invalid data subcategory: ${subcat}`);
+        return client.sendMessage(sender, `❌ Invalid data subcat: ${subcat}`);
       }
       const arr = dataPackages[subcat];
       const idx = arr.findIndex(p => p.id === idToRemove);
@@ -325,14 +327,14 @@ client.on('message', async (msg) => {
       const idToEdit = Number(splitted[3]);
       const newPrice = Number(splitted[4]);
       if (!dataPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Invalid data subcategory: ${subcat}`);
+        return client.sendMessage(sender, `❌ Invalid data subcat: ${subcat}`);
       }
       const pack = dataPackages[subcat].find(p => p.id === idToEdit);
       if (!pack) {
         return client.sendMessage(sender, `❌ No data package with ID ${idToEdit} in ${subcat}.`);
       }
       pack.price = newPrice;
-      return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] in ${subcat} to KSH ${newPrice}.`);
+      return client.sendMessage(sender, `✅ Updated data package [${idToEdit}] to KSH ${newPrice}.`);
     }
 
     // add sms ...
@@ -346,7 +348,7 @@ client.on('message', async (msg) => {
       const price = Number(splitted[2]);
       const validity = splitted[3];
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
+        return client.sendMessage(sender, `❌ Invalid sms subcat: ${subcat}`);
       }
       const arr = smsPackages[subcat];
       const newId = arr.length ? arr[arr.length - 1].id + 1 : 1;
@@ -363,7 +365,7 @@ client.on('message', async (msg) => {
       const subcat = splitted[2].toLowerCase();
       const idToRemove = Number(splitted[3]);
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
+        return client.sendMessage(sender, `❌ Invalid sms subcat: ${subcat}`);
       }
       const arr = smsPackages[subcat];
       const idx = arr.findIndex(p => p.id === idToRemove);
@@ -384,26 +386,26 @@ client.on('message', async (msg) => {
       const idToEdit = Number(splitted[3]);
       const newPrice = Number(splitted[4]);
       if (!smsPackages[subcat]) {
-        return client.sendMessage(sender, `❌ Invalid sms subcategory: ${subcat}`);
+        return client.sendMessage(sender, `❌ Invalid sms subcat: ${subcat}`);
       }
       const pack = smsPackages[subcat].find(p => p.id === idToEdit);
       if (!pack) {
         return client.sendMessage(sender, `❌ No SMS package with ID ${idToEdit} in ${subcat}.`);
       }
       pack.price = newPrice;
-      return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] in ${subcat} to KSH ${newPrice}.`);
+      return client.sendMessage(sender, `✅ Updated SMS package [${idToEdit}] to KSH ${newPrice}.`);
     }
 
     // referrals all
     if (lower === 'referrals all') {
-      let resp = `📢 *All Referral Data*\n\nMinWithdraw = ${MIN_WITHDRAWAL}, MaxWithdraw = ${MAX_WITHDRAWAL}\n\n`;
+      let resp = `📢 *All Referral Data*\nMinWithdraw = ${MIN_WITHDRAWAL}, MaxWithdraw = ${MAX_WITHDRAWAL}\n\n`;
       for (let r in referrals) {
         resp += `Referrer: ${r}\nCode: ${referrals[r].code}\nTotal Referred: ${referrals[r].referred.length}\nEarnings: KSH ${referrals[r].earnings}\nWithdrawals: ${referrals[r].withdrawals?.length || 0}\nPin: ${referrals[r].pin ? 'Set' : 'Not Set'}\n\n`;
       }
       return client.sendMessage(sender, resp);
     }
 
-    // withdraw update <referrer_code> <withdrawal_id> <STATUS> <remarks>
+    // withdraw update ...
     if (lower.startsWith('withdraw update ')) {
       const splitted = text.split(' ');
       if (splitted.length < 6) {
@@ -413,7 +415,6 @@ client.on('message', async (msg) => {
       const wdId = splitted[3];
       const newStatus = splitted[4].toUpperCase();
       const remarks = splitted.slice(5).join(' ');
-      // find who has this code
       let foundUser = null;
       for (let user in referrals) {
         if (referrals[user].code === refCode) {
@@ -427,25 +428,25 @@ client.on('message', async (msg) => {
       const wArr = referrals[foundUser].withdrawals || [];
       const wd = wArr.find(x => x.id === wdId);
       if (!wd) {
-        return client.sendMessage(sender, `❌ No withdrawal ID ${wdId} found for ref code ${refCode}.`);
+        return client.sendMessage(sender, `❌ No withdrawal ID ${wdId} found for code ${refCode}.`);
       }
       wd.status = newStatus;
       wd.remarks = remarks;
       client.sendMessage(foundUser, `🔔 *Withdrawal Update*\nYour withdrawal (ID: ${wdId}) is now *${newStatus}*.\nRemarks: ${remarks}`);
       return client.sendMessage(sender, `✅ Updated withdrawal ${wdId} to ${newStatus} with remarks: "${remarks}".`);
     }
-  } // END ADMIN COMMANDS
+  }
 
   // ---------- REFERRAL QUICK COMMANDS ----------
   if (lower === 'referral') {
     const link = getReferralLink(sender);
-    return client.sendMessage(sender, `😍 *Your Referral Link*\n${link}\nShare with friends to earn KSH5 for each successful order placed!`);
+    return client.sendMessage(sender, `😍 *Your Referral Link*\n${link}\nShare with friends to earn KSH5 per successful referral!`);
   }
   if (lower.startsWith('ref ')) {
     const splitted = text.split(' ');
     if (splitted.length === 2) {
       recordReferral(sender, splitted[1].toUpperCase());
-      return client.sendMessage(sender, `🙏 Thank you! You've been referred by code *${splitted[1].toUpperCase()}*. Enjoy our services!`);
+      return client.sendMessage(sender, `🙏 You've been referred by code *${splitted[1].toUpperCase()}*. Enjoy!`);
     }
   }
 
@@ -453,14 +454,13 @@ client.on('message', async (msg) => {
   if (lower === 'menu' || lower === 'start') {
     session[sender] = { step: 'main' };
     const welcome = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟\n\n` +
-      `Thank you for choosing FYS PROPERTY. Your satisfaction is our priority!\n\n` +
-      `Please choose an option by typing a number:\n` +
-      `1️⃣ Airtime\n2️⃣ Data Bundles\n3️⃣ SMS Bundles\n4️⃣ My Referrals\n\n` +
+      `Thank you for choosing FYS PROPERTY, where your satisfaction is our priority!\n\n` +
+      `Choose an option:\n1) Airtime\n2) Data Bundles\n3) SMS Bundles\n4) My Referrals\n\n` +
       `For order status: status <ORDER_ID>\nAfter payment: PAID <ORDER_ID>\nType "00" anytime for main menu.`;
     return client.sendMessage(sender, welcome);
   }
   if (text === '0') {
-    if (session[sender] && session[sender].prevStep) {
+    if (session[sender]?.prevStep) {
       session[sender].step = session[sender].prevStep;
       return client.sendMessage(sender, '🔙 Returning to previous menu...');
     } else {
@@ -475,25 +475,24 @@ client.on('message', async (msg) => {
 
   // ---------- REFERRALS MENU (OPTION 4) ----------
   if (session[sender]?.step === 'main' && text === '4') {
-    // My Referrals sub-menu
     session[sender].prevStep = 'main';
     session[sender].step = 'my_referrals_menu';
     const refMenu = `🌟 *My Referrals Menu* 🌟\n\n` +
-      `1) View Earnings & Balance\n2) Withdraw Earnings\n3) Get Referral Link\n4) Set/Update PIN\n5) View Referred Users (partially masked)\n\nType the number, or "0" to go back.`;
+      `1) View Earnings & Balance\n2) Withdraw Earnings\n3) Get Referral Link\n4) Set/Update PIN\n5) View Referred Users\n\nType a number, or "0" to go back.`;
     return client.sendMessage(sender, refMenu);
   }
   if (session[sender]?.step === 'my_referrals_menu') {
     if (text === '1') {
       // View Earnings & Balance
       if (!referrals[sender]) {
-        return client.sendMessage(sender, `😞 You have no referral record yet. Type "referral" to generate your link and start referring friends!`);
+        return client.sendMessage(sender, `😞 You have no referral record. Type "referral" to get your link!`);
       }
       const rData = referrals[sender];
       let msg = `📢 *Referral Overview*\nCode: *${rData.code}*\nEarnings: KSH ${rData.earnings}\nTotal Referred: ${rData.referred.length}\n\n`;
       if (rData.withdrawals && rData.withdrawals.length > 0) {
         msg += `🪙 *Withdrawal History*:\n`;
         rData.withdrawals.forEach((wd, i) => {
-          msg += `${i + 1}. ID: ${wd.id}, Amt: KSH ${wd.amount}, Status: ${wd.status}, Requested: ${formatKenyaTime(wd.timestamp)}\nRemarks: ${wd.remarks}\n`;
+          msg += `${i + 1}. ID: ${wd.id}, Amt: KSH ${wd.amount}, Status: ${wd.status}, Time: ${formatKenyaTime(new Date(wd.timestamp))}\nRemarks: ${wd.remarks}\n\n`;
         });
       } else {
         msg += `No withdrawals yet.\n`;
@@ -505,31 +504,31 @@ client.on('message', async (msg) => {
         return client.sendMessage(sender, `😞 You need at least KSH ${MIN_WITHDRAWAL} to withdraw. Keep referring or placing orders!`);
       }
       if (!referrals[sender].pin) {
-        return client.sendMessage(sender, `⚠️ You have not set a withdrawal PIN yet. Choose option 4 to set your PIN first.`);
+        return client.sendMessage(sender, `⚠️ You haven't set a withdrawal PIN yet. Choose option 4 first.`);
       }
       session[sender].step = 'withdraw_request';
       return client.sendMessage(sender, `💸 *Withdrawal Request*\nEnter "<amount> <mpesa_number>" e.g. "50 0712345678".\nLimits: Min KSH ${MIN_WITHDRAWAL}, Max KSH ${MAX_WITHDRAWAL}\nType "0" to go back.`);
     } else if (text === '3') {
       // Referral link
       const link = getReferralLink(sender);
-      return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare to earn KSH5 per successful referral!`);
+      return client.sendMessage(sender, `😍 *Your Referral Link*\n${link}\nShare to earn KSH5 per successful referral!`);
     } else if (text === '4') {
-      // Set or update PIN
+      // Set/Update PIN
       session[sender].step = 'set_pin';
-      return client.sendMessage(sender, `🔐 *Set/Update PIN*\nEnter a 4-digit PIN (not "1234" or "0000").`);
+      return client.sendMessage(sender, `🔐 Enter a new 4-digit PIN (not "1234" or "0000").`);
     } else if (text === '5') {
-      // View referred users partially masked
+      // View Referred Users
       if (!referrals[sender] || referrals[sender].referred.length === 0) {
-        return client.sendMessage(sender, `😞 You haven't referred anyone yet. Type "referral" to get your link!`);
+        return client.sendMessage(sender, `😞 No referred users yet. Type "referral" to get your link!`);
       }
       let userList = `👥 *Your Referred Users* (partially masked):\n\n`;
       referrals[sender].referred.forEach((u, i) => {
         const masked = maskWhatsAppID(u);
-        // Gather stats: how many orders placed, how many canceled
-        const userAllOrders = Object.values(orders).filter(o => o.customer === u);
-        const totalOrders = userAllOrders.length;
-        const canceledOrders = userAllOrders.filter(o => o.status === 'CANCELLED').length;
-        userList += `${i + 1}. ${masked}\n   Orders Placed: ${totalOrders}, Cancelled: ${canceledOrders}\n\n`;
+        // Stats: how many orders, how many canceled
+        const userAll = Object.values(orders).filter(o => o.customer === u);
+        const total = userAll.length;
+        const canceled = userAll.filter(o => o.status === 'CANCELLED').length;
+        userList += `${i + 1}. ${masked}\n   Orders: ${total}, Cancelled: ${canceled}\n\n`;
       });
       return client.sendMessage(sender, userList);
     } else {
@@ -552,10 +551,10 @@ client.on('message', async (msg) => {
       return client.sendMessage(sender, '❌ Invalid M-Pesa number.');
     }
     if (!referrals[sender]) {
-      return client.sendMessage(sender, `😞 No referral record found. Type "referral" to get your link.`);
+      return client.sendMessage(sender, `😞 No referral record. Type "referral" to get your link.`);
     }
     if (amount > referrals[sender].earnings || amount > MAX_WITHDRAWAL) {
-      return client.sendMessage(sender, `❌ You cannot withdraw more than your current earnings (KSH ${referrals[sender].earnings}) or the max limit (KSH ${MAX_WITHDRAWAL}).`);
+      return client.sendMessage(sender, `❌ You can't withdraw more than your earnings (KSH ${referrals[sender].earnings}) or max limit (KSH ${MAX_WITHDRAWAL}).`);
     }
     if (amount < MIN_WITHDRAWAL) {
       return client.sendMessage(sender, `❌ Minimum withdrawal is KSH ${MIN_WITHDRAWAL}.`);
@@ -565,14 +564,12 @@ client.on('message', async (msg) => {
     return client.sendMessage(sender, `🔒 Enter your 4-digit PIN to confirm withdrawing KSH ${amount} to ${mpesa}.`);
   }
   if (session[sender]?.step === 'withdraw_pin') {
-    // Validate pin
     if (!referrals[sender]) {
       return client.sendMessage(sender, '❌ No referral record found.');
     }
     if (referrals[sender].pin !== text) {
       return client.sendMessage(sender, '❌ Incorrect PIN. Withdrawal canceled.');
     }
-    // Process
     const reqData = session[sender].withdrawRequest;
     const wd = {
       id: `WD-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -582,13 +579,12 @@ client.on('message', async (msg) => {
       timestamp: new Date().toISOString(),
       remarks: ''
     };
-    referrals[sender].withdrawals = referrals[sender].withdrawals || [];
     referrals[sender].withdrawals.push(wd);
     referrals[sender].earnings -= reqData.amount;
     delete session[sender].withdrawRequest;
     session[sender].step = 'my_referrals_menu';
-    client.sendMessage(sender, `🙏 *Withdrawal Requested!*\nID: ${wd.id}, KSH ${wd.amount} to ${wd.mpesa}\nStatus: PENDING.\nWe appreciate you choosing FYS PROPERTY!`);
-    client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 *New Withdrawal Request*\nUser: ${sender}\nWithdrawal ID: ${wd.id}\nAmount: KSH ${wd.amount}\nM-Pesa: ${wd.mpesa}\nTime: ${formatKenyaTime(wd.timestamp)}\nUse "withdraw update <ref_code> <wd_id> <STATUS> <remarks>" to update.`);
+    client.sendMessage(sender, `🙏 *Withdrawal Requested!*\nID: ${wd.id}, KSH ${wd.amount} to ${wd.mpesa}\nStatus: PENDING.\nThank you for choosing FYS PROPERTY!`);
+    client.sendMessage(`${ADMIN_NUMBER}@c.us`, `🔔 *New Withdrawal Request*\nUser: ${sender}\nWithdrawal ID: ${wd.id}\nAmount: KSH ${wd.amount}\nM-Pesa: ${wd.mpesa}\nTime: ${formatKenyaTime(new Date(wd.timestamp))}\nUse "withdraw update <ref_code> <wd_id> <STATUS> <remarks>" to update.`);
     return;
   }
 
@@ -613,9 +609,8 @@ client.on('message', async (msg) => {
   // ---------- FALLBACK ----------
   client.sendMessage(sender,
     `🤖 *FY'S ULTRA BOT*\n` +
-    `Type "menu" to see the main menu.\n` +
-    `For order status: status <ORDER_ID>\nAfter payment: PAID <ORDER_ID>\nFor referrals: my referrals\n` +
-    `Or "0" for previous, "00" for main menu.`
+    `Type "menu" for main menu.\nOrder status: status <ORDER_ID>\nAfter payment: PAID <ORDER_ID>\nReferrals: my referrals\n` +
+    `Or "0" or "00" for menus.`
   );
 });
 
