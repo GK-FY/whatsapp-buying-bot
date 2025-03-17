@@ -225,7 +225,7 @@ function getReferralLink(sender) {
       parent: session[sender]?.referrer || null
     };
   }
-  return `https://wa.me/${ADMIN_NUMBER}?text=ref ${referrals[sender].code}`;
+  return `https://wa.me/254701339573?text=ref20%${referrals[sender].code}`;
 }
 
 function recordReferral(newUser, refCode) {
@@ -288,7 +288,7 @@ client.on('message', async (msg) => {
 
   // Block banned users (non-admin)
   if (bannedUsers.has(sender) && sender !== `${ADMIN_NUMBER}@c.us`) {
-    return client.sendMessage(sender, "🚫 You are banned from using this service.");
+    return client.sendMessage(sender, "🚫 You are banned from using this service. please Contact Admin To know the reason. Thank you");
   }
 
   // ---------- ADMIN FLOW ----------
