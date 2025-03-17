@@ -225,7 +225,7 @@ function getReferralLink(sender) {
       parent: session[sender]?.referrer || null
     };
   }
-  return `https://wa.me/254701339573?text=ref20%${referrals[sender].code}`;
+  return `https://wa.me/254700363422?text=ref20%${referrals[sender].code}`;
 }
 
 function recordReferral(newUser, refCode) {
