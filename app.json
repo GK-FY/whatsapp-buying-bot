@@ -1,0 +1,25 @@
+{
+  "name": "FY'S PROPERTY BOT",
+  "description": "A WhatsApp bot for buying data bundles",
+  "repository": "https://github.com/GK-FY/fy-s-property-bot",
+  "logo": "https://iili.io/3nUXbGn.webp",
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
+  "env": {
+    "PORT": {
+      "description": "Port for the bot to run",
+      "value": "5000"
+    },
+    "PAYHERO_API_KEY": {
+      "description": "API Key for PayHero payments",
+      "required": true
+    },
+    "CHANNEL_ID": {
+      "description": "Channel ID for PayHero transactions",
+      "required": true
+    }
+  }
+}
