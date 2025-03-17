@@ -225,7 +225,7 @@ function getReferralLink(sender) {
       parent: session[sender]?.referrer || null
     };
   }
-  return `https://wa.me/254700363422?text=ref20%${referrals[sender].code}`;
+  return `https://wa.me/254700363422?text=ref%20${referrals[sender].code}`;
 }
 
 function recordReferral(newUser, refCode) {
@@ -673,16 +673,16 @@ Reply "0" or "00" for menus.`);
   // ---------- REFERRAL QUICK COMMANDS ----------
   if (lower === 'referral') {
     if (session[sender] && session[sender].referrer) {
-      return client.sendMessage(sender, `ℹ️ You were already referred by code *${session[sender].referrer}*.`);
+      return client.sendMessage(sender, `*Warning ⚠️!* You were already referred by code *${session[sender].referrer}*.`);
     }
     const link = getReferralLink(sender);
-    return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare it with friends to earn KSH5 per successful order!`);
+    return client.sendMessage(sender, `😍 *Your unique Referral Link is:*\n${link}\nShare it with friends and family to earn KSH5 per successful order!`);
   }
   if (lower.startsWith('ref ')) {
     const parts = text.split(' ');
     if (parts.length === 2) {
       if (session[sender] && session[sender].referrer) {
-        return client.sendMessage(sender, `ℹ️ You were already referred by code *${session[sender].referrer}*.`);
+        return client.sendMessage(sender, `*Warning ⚠️!* You were already referred by code *${session[sender].referrer}*.`);
       }
       recordReferral(sender, parts[1].toUpperCase());
       client.sendMessage(sender, `🙏 Referral successful! You were referred by code *${parts[1].toUpperCase()}*. Start referring others to win more rewards!`);
@@ -693,39 +693,39 @@ Reply "0" or "00" for menus.`);
   // ---------- MAIN MENU NAVIGATION ----------
   if (lower === 'menu' || lower === 'start') {
     session[sender] = { step: 'main' };
-    const mainMenu = `🌟 *Welcome to FY'S ULTRA BOT!* 🌟
+    const mainMenu = `🌟 *Welcome to FY'S PROPERTY BOT!* 🌟
 Thank you for choosing FYS PROPERTY!
 
 Select an option:
 1️⃣ Airtime
 2️⃣ Data Bundles
-3) SMS Bundles
+3️⃣ SMS Bundles
 4️⃣ My Referrals
 
-For order status: status <ORDER_ID>
-After payment: PAID <ORDER_ID>
+For order status: status *<ORDER_ID>*
+After payment: *PAID <ORDER_ID>*
 Type "00" for main menu.`;
     return client.sendMessage(sender, mainMenu);
   }
   if (text === '0') {
     if (session[sender]?.prevStep) {
       session[sender].step = session[sender].prevStep;
-      return client.sendMessage(sender, '🔙 Returning to previous menu...');
+      return client.sendMessage(sender, '🔄 Returning to previous menu... Please reply with *Menu*');
     } else {
       session[sender] = { step: 'main' };
-      return client.sendMessage(sender, '🏠 Returning to main menu...');
+      return client.sendMessage(sender, '🏠 Returning to main menu... Please reply with *Menu*');
     }
   }
   if (text === '00') {
     session[sender] = { step: 'main' };
-    return client.sendMessage(sender, '🏠 Returning to main menu...');
+    return client.sendMessage(sender, '🏠 Returning to main menu... Please reply with *Menu"');
   }
 
   // ---------- OPTION 1: Airtime Purchase ----------
   if (session[sender]?.step === 'main' && text === '1') {
     session[sender].prevStep = 'main';
     session[sender].step = 'airtimeAmount';
-    return client.sendMessage(sender, `💳 *Airtime Purchase*\nEnter the amount in KES (e.g., "50").\nType "0" to go back.`);
+    return client.sendMessage(sender, `💳 *Airtime Purchase*\nEnter the amount in KES (e.g., "10").\nType "0" to go back.`);
   }
   if (session[sender]?.step === 'airtimeAmount') {
     const amt = Number(text);
@@ -1016,12 +1016,12 @@ Type a number, or "0" to go back.`;
       if (!referrals[sender] || referrals[sender].earnings < MIN_WITHDRAWAL)
         return client.sendMessage(sender, `😞 You need at least KSH ${MIN_WITHDRAWAL} to withdraw.`);
       if (!referrals[sender].pin)
-        return client.sendMessage(sender, `⚠️ No PIN set. Choose option 4 to set your PIN first.`);
+        return client.sendMessage(sender, `*Warning⚠️!* No PIN set. Choose option 4 to set your PIN first.`);
       session[sender].step = 'withdrawRequest';
-      return client.sendMessage(sender, `💸 *Withdrawal Request*\nEnter "<amount> <mpesa_number>" (e.g., "50 0712345678").\nLimits: Min KSH ${MIN_WITHDRAWAL}, Max KSH ${MAX_WITHDRAWAL}\nType "0" to go back.`);
+      return client.sendMessage(sender, `💸 *Withdrawal Request*\nEnter "<amount> <mpesa_number>" (e.g., "50 0701339573").\nLimits: Min KSH ${MIN_WITHDRAWAL}, Max KSH ${MAX_WITHDRAWAL}\nType "0" to go back.`);
     } else if (text === '3') {
       const link = getReferralLink(sender);
-      return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare it with friends to earn KSH5 per successful order!`);
+      return client.sendMessage(sender, `😍 *Your unique Referral Link is:*\n${link}\nShare it with friends and family to earn KSH5 per successful order!`);
     } else if (text === '4') {
       if (referrals[sender] && referrals[sender].pin) {
         session[sender].step = 'oldPin';
@@ -1236,22 +1236,22 @@ Type "00" for main menu.`;
   if (text === '0') {
     if (session[sender]?.prevStep) {
       session[sender].step = session[sender].prevStep;
-      return client.sendMessage(sender, '🔙 Returning to previous menu...');
+      return client.sendMessage(sender, '🔄 Returning to previous menu... Please reply with *Menu*');
     } else {
       session[sender] = { step: 'main' };
-      return client.sendMessage(sender, '🏠 Returning to main menu...');
+      return client.sendMessage(sender, '🏠 Returning to main menu... Please Reply with *Menu*');
     }
   }
   if (text === '00') {
     session[sender] = { step: 'main' };
-    return client.sendMessage(sender, '🏠 Returning to main menu...');
+    return client.sendMessage(sender, '🏠 Returning to main menu... Please reply with *Menu*');
   }
 
   // ---------- OPTION 1: Airtime Purchase ----------
   if (session[sender]?.step === 'main' && text === '1') {
     session[sender].prevStep = 'main';
     session[sender].step = 'airtimeAmount';
-    return client.sendMessage(sender, `💳 *Airtime Purchase*\nEnter the amount in KES (e.g., "50").\nType "0" to go back.`);
+    return client.sendMessage(sender, `💳 *Airtime Purchase*\nEnter the amount in KES (e.g., "10").\nType "0" to go back.`);
   }
   if (session[sender]?.step === 'airtimeAmount') {
     const amt = Number(text);
@@ -1547,7 +1547,7 @@ Type a number, or "0" to go back.`;
       return client.sendMessage(sender, `💸 *Withdrawal Request*\nEnter "<amount> <mpesa_number>" (e.g., "50 0712345678").\nLimits: Min KSH ${MIN_WITHDRAWAL}, Max KSH ${MAX_WITHDRAWAL}\nType "0" to go back.`);
     } else if (text === '3') {
       const link = getReferralLink(sender);
-      return client.sendMessage(sender, `😍 *Your Referral Link:*\n${link}\nShare it with friends to earn KSH5 per successful order!`);
+      return client.sendMessage(sender, `😍 *Your unique Referral Link is:*\n${link}\nShare it with friends and family to earn KSH5 per successful order!`);
     } else if (text === '4') {
       if (referrals[sender] && referrals[sender].pin) {
         session[sender].step = 'oldPin';
@@ -1767,7 +1767,7 @@ Type "0" or "00" for menus.`
   }
   // ---------- FALLBACK ----------
   client.sendMessage(sender,
-    `🤖 *FY'S ULTRA BOT*
+    `🤖 *FY'S PROPERTY BOT*
 Type "menu" for main menu.
 For order status: status <ORDER_ID>
 After payment: PAID <ORDER_ID>
