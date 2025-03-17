@@ -130,7 +130,7 @@ function getReferralLink(sender) {
     // If the user was referred, store their parent's code in "parent" for second-level bonus
     referrals[sender] = { code, referred: [], earnings: 0, withdrawals: [], pin: null, parent: session[sender]?.referrer || null };
   }
-  return `https://wa.me/254110260918?text=ref ${referrals[sender].code}`;
+  return `https://wa.me/254110260918?text=ref%20${referrals[sender].code}`;
 }
 function recordReferral(newUser, refCode) {
   for (let ref in referrals) {
