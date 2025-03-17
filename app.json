@@ -1,7 +1,7 @@
 {
   "name": "FY'S PROPERTY BOT",
   "description": "A WhatsApp bot for buying data bundles",
-  "repository": "https://github.com/GK-FY/fy-s-property-bot",
+  "repository": "https://github.com/GK-FY/whatsapp-buying-bot",
   "logo": "https://iili.io/3nUXbGn.webp",
   "buildpacks": [
     {
