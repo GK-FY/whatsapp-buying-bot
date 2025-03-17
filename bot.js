@@ -1,3 +1,7 @@
+// =============================
+// FY'S PROPERTY BOT – Full Combined Code
+// =============================
+
 // Load environment variables and dependencies
 require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
@@ -12,10 +16,10 @@ const fetch = require('node-fetch'); // using node-fetch@2 for CommonJS
  * =============================
  */
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '254701339573';
-let PAYMENT_INFO = '0701339573 (Camlus)';  // Default payment info; admin can update it later
+let PAYMENT_INFO = '0701339573 (Camlus)'; // Default payment info; admin can update it later
 const PORT = 3000;
 
-// PayHero credentials for both STK push and Withdrawal API (admin can update via command)
+// PayHero credentials for STK push & Withdrawal API (admin can update via command)
 let PAYHERO_CHANNEL_ID = 911;
 let PAYHERO_AUTH_BASE64 = '3A6anVoWFZrRk5qSVl0MGNMOERGMlR3dlhrQ0VWUWJHNDVVVnNaMEdDSw==';
 
@@ -34,21 +38,21 @@ const bannedUsers = new Set(); // Set of banned user IDs
  * HELPER FUNCTIONS
  * =============================
  */
-// Format date/time to Kenyan local time (UTC+3)
+// Format a Date to Kenyan local time (UTC+3)
 function formatKenyaTime(date) {
   const utcMs = date.getTime() + (date.getTimezoneOffset() * 60000);
   const kenyaMs = utcMs + (3 * 3600000);
   const d = new Date(kenyaMs);
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
-// Mask a WhatsApp ID (e.g., "254701234567@c.us" becomes "25470****7@c.us")
+// Mask a WhatsApp ID (e.g. "254701234567@c.us" becomes "25470****7@c.us")
 function maskWhatsAppID(waid) {
   const atIndex = waid.indexOf('@');
   if (atIndex === -1) return waid;
   const phone = waid.slice(0, atIndex);
   if (phone.length < 6) return waid;
-  return `${phone.slice(0,5)}****${phone.slice(-1)}@c.us`;
+  return `${phone.slice(0, 5)}****${phone.slice(-1)}@c.us`;
 }
 
 // Generate a unique order ID
@@ -56,14 +60,14 @@ function generateOrderID() {
   return `FY'S-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
-// Validate if a number is a valid Safaricom number (e.g., 07XXXXXXXX or 01XXXXXXXX)
+// Validate if a number is a valid Safaricom number (e.g. 07XXXXXXXX or 01XXXXXXXX)
 function isSafaricomNumber(num) {
   return /^0[71]\d{8}$/.test(num) || /^01\d{8}$/.test(num);
 }
 
 /**
  * =============================
- * STK PUSH & WITHDRAWAL API FUNCTIONS
+ * API FUNCTIONS: STK PUSH & WITHDRAWAL
  * =============================
  */
 async function sendSTKPush(amount, phoneNumber, externalRef, customerName) {
@@ -131,7 +135,7 @@ async function processWithdrawal(wd) {
 
 /**
  * =============================
- * PACKAGES: Data & SMS
+ * PACKAGES: DATA BUNDLES & SMS BUNDLES
  * =============================
  */
 const dataPackages = {
@@ -154,6 +158,7 @@ const dataPackages = {
     { id: 2, name: '500MB', price: 100, validity: '30 days' }
   ]
 };
+
 const smsPackages = {
   daily: [
     { id: 1, name: '200 SMS', price: 10, validity: 'Daily' }
@@ -186,17 +191,17 @@ client.on('qr', (qr) => {
   });
 });
 
-// Do not respond in group chats
+// Prevent bot from responding in group chats
 client.on('message', async (msg) => {
   if (msg.from.endsWith('@g.us')) return;
 });
 
 client.on('ready', () => {
-  console.log('✅ FY\'S PROPERTY BOT is online!');
+  console.log('✅ FY’S PROPERTY BOT is online!');
   client.sendMessage(
     `${ADMIN_NUMBER}@c.us`,
     `🎉 Welcome to FY'S PROPERTY BOT! 🎉
-Your one-stop solution for Airtime, Data, SMS, and more! 😍
+Your one-stop solution for Airtime, Data, SMS, withdrawals & referrals! 😍
 Type "menu" for user commands or "Admin CMD" for admin controls.`
   );
 });
@@ -222,7 +227,7 @@ function getReferralLink(sender) {
 }
 
 function recordReferral(newUser, refCode) {
-  // If already referred, do not update and inform user later
+  // If already referred, do not update; user will be notified
   if (session[newUser] && session[newUser].referrer) return;
   for (let r in referrals) {
     if (referrals[r].code === refCode) {
@@ -276,10 +281,10 @@ client.on('message', async (msg) => {
   const text = msg.body.trim();
   const lower = text.toLowerCase();
 
-  // BLOCK group messages
+  // BLOCK group chats
   if (sender.endsWith('@g.us')) return;
 
-  // BLOCK banned users (non-admin)
+  // BLOCK banned users (if not admin)
   if (bannedUsers.has(sender) && sender !== `${ADMIN_NUMBER}@c.us`) {
     return client.sendMessage(sender, "🚫 You are banned from using FY'S PROPERTY BOT.");
   }
@@ -288,7 +293,7 @@ client.on('message', async (msg) => {
   if (sender === `${ADMIN_NUMBER}@c.us`) {
     if (lower === 'admin cmd') {
       const adminMenu = `📜 *FY'S PROPERTY BOT - Admin Panel* 📜
-💡 Available Commands:
+💡 Commands:
 1️⃣ update <ORDER_ID> <STATUS> <REMARK>
 2️⃣ set payment <mpesa_number> "<Name>"
 3️⃣ add data <subcat> "<name>" <price> "<validity>"
@@ -309,11 +314,12 @@ client.on('message', async (msg) => {
 1️⃣8️⃣ approve <wd_id>
 1️⃣9️⃣ cancel <wd_id>
 2️⃣0️⃣ all users
+2️⃣1️⃣ msg [user1,user2,...] <message>
 
-Type the command exactly as shown with proper spacing.`;
+Type the command exactly as shown with proper spaces.`;
       return client.sendMessage(sender, adminMenu);
     }
-    // set payhero <channel_id> <base64Auth>
+    // set payhero
     if (lower.startsWith('set payhero ')) {
       const parts = text.split(' ');
       if (parts.length < 4)
@@ -326,7 +332,7 @@ Type the command exactly as shown with proper spacing.`;
       PAYHERO_AUTH_BASE64 = auth;
       return client.sendMessage(sender, `✅ Updated STK & Withdrawal config!
 🔑 channel_id: ${chId}
-🔑 Authorization: Basic ${auth}`);
+🔑 Auth: Basic ${auth}`);
     }
     // ban and unban commands
     if (lower.startsWith('ban ')) {
@@ -357,7 +363,7 @@ Type the command exactly as shown with proper spacing.`;
       return client.sendMessage(sender, `✅ Withdrawal limits updated!
 💸 Min: KSH ${MIN_WITHDRAWAL} | Max: KSH ${MAX_WITHDRAWAL}`);
     }
-    // update order – allow only if order status is still PENDING
+    // update order (only if still PENDING)
     if (lower.startsWith('update ')) {
       const parts = text.split(' ');
       if (parts.length < 4)
@@ -368,15 +374,15 @@ Type the command exactly as shown with proper spacing.`;
       if (!orders[orderID])
         return client.sendMessage(sender, `❌ Order ${orderID} not found.`);
       if (orders[orderID].status !== 'PENDING')
-        return client.sendMessage(sender, `❌ Order ${orderID} has already been marked as ${orders[orderID].status}. To check, type: status ${orderID}`);
+        return client.sendMessage(sender, `❌ Order ${orderID} has already been marked as ${orders[orderID].status}.`);
       orders[orderID].status = status;
       orders[orderID].remark = remark;
       const user = orders[orderID].customer;
       let extra = '';
       if (status === 'CONFIRMED') {
-        extra = '✅ Payment confirmed! Your order is now being processed.';
+        extra = '✅ Payment confirmed! Your order is being processed.';
       } else if (status === 'COMPLETED') {
-        extra = '🎉 Your order is complete! Thank you for choosing FY\'S PROPERTY BOT.';
+        extra = '🎉 Your order is complete! Thank you for choosing FY’S PROPERTY BOT.';
         if (orders[orderID].referrer) {
           let direct = null;
           for (let u in referrals) {
@@ -416,7 +422,7 @@ ${extra}
 To check your order, type: status ${orderID}`);
       return client.sendMessage(sender, `✅ Order ${orderID} updated to ${status} with remark: "${remark}".`);
     }
-    // set payment
+    // set payment command
     if (lower.startsWith('set payment ')) {
       const parts = parseQuotedParts(text.split(' '), 2);
       if (parts.length < 2)
@@ -538,9 +544,7 @@ Parent: ${referrals[u].parent || 'None'}\n\n`;
       for (let oid in orders) {
         users.add(orders[oid].customer);
       }
-      users.forEach(u => {
-        userList += `${u}\n`;
-      });
+      users.forEach(u => { userList += `${u}\n`; });
       return client.sendMessage(sender, userList);
     }
     // withdraw update <ref_code> <wd_id> <STATUS> <remarks>
@@ -569,7 +573,7 @@ Your withdrawal (ID: ${wdId}) is now *${newStatus}*.
 Remarks: ${remarks} 👍`);
       return client.sendMessage(sender, `✅ Updated withdrawal ${wdId} to ${newStatus} with remarks: "${remarks}".`);
     }
-    // approve <wd_id> – call withdrawal API
+    // approve <wd_id> – process withdrawal via API
     if (lower.startsWith('approve ')) {
       const parts = text.split(' ');
       if (parts.length !== 2)
@@ -690,11 +694,40 @@ New Earnings: KSH ${referrals[target].earnings} 💰`);
 📝 Remark: ${o.remark || 'None'}`
       );
     }
-  } // End Admin Commands
+    // all users – list unique users from orders
+    if (lower === 'all users') {
+      let userList = '📋 *FY\'S PROPERTY BOT - All Users* 📋\n';
+      const users = new Set();
+      for (let oid in orders) {
+        users.add(orders[oid].customer);
+      }
+      users.forEach(u => { userList += `${u}\n`; });
+      return client.sendMessage(sender, userList);
+    }
+    // New admin command: msg [user1,user2,...] <message>
+    if (lower.startsWith('msg ')) {
+      // Expected syntax: msg [user1,user2,...] message text
+      const match = text.match(/^msg\s+\[([^\]]+)\]\s+(.+)/i);
+      if (!match)
+        return client.sendMessage(sender, '❌ Usage: msg [user1,user2,...] <message>');
+      const usersStr = match[1];
+      const messageText = match[2];
+      const userList = usersStr.split(',').map(u => u.trim()).filter(u => u);
+      if (userList.length === 0)
+        return client.sendMessage(sender, '❌ No valid user IDs found.');
+      userList.forEach(user => {
+        // Append @c.us if not already present
+        const userId = user.includes('@') ? user : `${user}@c.us`;
+        client.sendMessage(userId, `📢 *Message from Admin:* \n${messageText}`);
+      });
+      return client.sendMessage(sender, `✅ Message sent to: ${userList.join(', ')}`);
+    }
+    // End Admin Commands
+  } // End Admin Block
 
   // ---------- USER COMMANDS ----------
 
-  // Referral quick commands
+  // Referral commands
   if (lower === 'referral') {
     if (session[sender] && session[sender].referrer) {
       return client.sendMessage(sender, `ℹ️ You were already referred by code *${session[sender].referrer}*.`);
@@ -702,7 +735,7 @@ New Earnings: KSH ${referrals[target].earnings} 💰`);
     const link = getReferralLink(sender);
     return client.sendMessage(sender, `😍 *Your Referral Link* 😍
 ${link}
-Share it with friends and start referring to win more rewards!`);
+Share it with your friends and start referring to win amazing rewards! 🎁`);
   }
   if (lower.startsWith('ref ')) {
     const parts = text.split(' ');
@@ -711,16 +744,16 @@ Share it with friends and start referring to win more rewards!`);
         return client.sendMessage(sender, `ℹ️ You were already referred by code *${session[sender].referrer}*.`);
       }
       recordReferral(sender, parts[1].toUpperCase());
-      client.sendMessage(sender, `🙏 Referral successful! You were referred by code *${parts[1].toUpperCase()}*. Now, start referring others to win even more rewards!`);
+      client.sendMessage(sender, `🙏 Referral successful! You were referred by code *${parts[1].toUpperCase()}*. Now, start referring others for more rewards! 🎉`);
       return;
     }
   }
 
-  // Main menu navigation for users
+  // Main menu for users
   if (lower === 'menu' || lower === 'start') {
     session[sender] = { step: 'main' };
     const welcome = `🌟 Welcome to FY'S PROPERTY BOT! 🌟
-Your one-stop solution for Airtime, Data, SMS, and more! 😍
+Your one-stop solution for Airtime, Data, SMS, withdrawals & referrals! 😍
 Select an option:
 1️⃣ Airtime
 2️⃣ Data Bundles
@@ -747,7 +780,7 @@ Type "00" for main menu.`;
   }
 
   // ---------- PURCHASE FLOWS ----------
-  // Option 1: Airtime
+  // Option 1: Airtime Purchase
   if (session[sender]?.step === 'main' && text === '1') {
     session[sender].prevStep = 'main';
     session[sender].step = 'airtimeAmount';
@@ -787,7 +820,6 @@ Now, please enter your payment number (07XXXXXXXX) 📱:`);
       status: 'PENDING',
       timestamp: new Date().toISOString()
     };
-    // Attempt STK push
     const pushResult = await sendSTKPush(amt, text, orderID, 'FY\'S PROPERTY BOT');
     if (pushResult.success) {
       client.sendMessage(sender, `${pushResult.message} 📲\nIf you don't receive it within a minute, please pay manually to ${PAYMENT_INFO}.`);
@@ -858,7 +890,7 @@ Type "0" to go back.`);
     session[sender].prevStep = 'dataList';
     session[sender].step = 'dataRecip';
     return client.sendMessage(sender, `✅ You selected: ${pkg.name} (KSH ${pkg.price})!
-Enter recipient phone number (07XXXXXXXX) 📞:`);
+Please enter the recipient phone number (07XXXXXXXX) 📞:`);
   }
   if (session[sender]?.step === 'dataRecip') {
     if (!isSafaricomNumber(text))
@@ -917,7 +949,8 @@ User: ${sender}
     client.sendMessage(`${ADMIN_NUMBER}@c.us`, adminMsg);
     return;
   }
-  // Option 3: SMS Bundles (Flow similar to Data)
+
+  // Option 3: SMS Bundles
   if (session[sender]?.step === 'main' && text === '3') {
     session[sender].prevStep = 'main';
     session[sender].step = 'smsCategory';
@@ -963,7 +996,7 @@ Enter recipient phone number (07XXXXXXXX) 📞:`);
     session[sender].prevStep = 'smsRecip';
     session[sender].step = 'smsPay';
     return client.sendMessage(sender, `✅ Recipient set: ${text}!
-Now, enter your payment number (07XXXXXXXX) 📱:`);
+Now, please enter your payment number (07XXXXXXXX) 📱:`);
   }
   if (session[sender]?.step === 'smsPay') {
     if (!isSafaricomNumber(text))
@@ -984,7 +1017,7 @@ Now, enter your payment number (07XXXXXXXX) 📱:`);
     }
     const pushResult = await sendSTKPush(orders[orderID].amount, text, orderID, 'FY\'S PROPERTY BOT');
     if (pushResult.success) {
-      client.sendMessage(sender, `${pushResult.message} 📲\nIf not, please pay manually to ${PAYMENT_INFO}.`);
+      client.sendMessage(sender, `${pushResult.message} 📲\nIf you don't receive it within a minute, please pay manually to ${PAYMENT_INFO}.`);
     } else {
       client.sendMessage(sender, `${pushResult.message} 😟\nPlease pay manually to ${PAYMENT_INFO}.`);
     }
@@ -1004,10 +1037,10 @@ Type "00" for main menu.`;
     const adminMsg = `🔔 *New SMS Order* 🔔
 🆔 Order ID: ${orderID}
 Package: ${orders[orderID].package}
-Price: KSH ${orders[orderID].amount}
-Recipient: ${orders[orderID].recipient}
-Payment: ${orders[orderID].payment}
-Time: ${formatKenyaTime(new Date(orders[orderID].timestamp))}
+💰 Price: KSH ${orders[orderID].amount}
+📞 Recipient: ${orders[orderID].recipient}
+📱 Payment: ${orders[orderID].payment}
+🕒 Placed at: ${formatKenyaTime(new Date(orders[orderID].timestamp))}
 User: ${sender}
 (Use admin commands to update.)`;
     client.sendMessage(`${ADMIN_NUMBER}@c.us`, adminMsg);
@@ -1025,7 +1058,7 @@ User: ${sender}
     if (orders[orderID].status !== 'PENDING')
       return client.sendMessage(sender, `❌ Order ${orderID} has already been marked as ${orders[orderID].status}. To check its status, type: status ${orderID}`);
     orders[orderID].status = 'CONFIRMED';
-    // Two-level referral bonus
+    // Apply two-level referral bonus if applicable
     if (orders[orderID].referrer && !orders[orderID].referralCredited) {
       let directUser = null;
       for (let u in referrals) {
