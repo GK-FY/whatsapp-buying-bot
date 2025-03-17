@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-buying-bot",
   "version": "1.0.0",
-  "description": "A full-featured WhatsApp bot for Airtime, Data, SMS, STK push, and Referrals with Admin Controls",
+  "description": "A WhatsApp bot for Airtime, Data, SMS, STK push, and Referrals with Admin Controls",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
